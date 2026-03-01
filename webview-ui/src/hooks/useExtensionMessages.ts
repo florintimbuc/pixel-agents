@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useEffectEvent, useRef, useState } from 'react';
 
 import { playDoneSound, setSoundEnabled } from '../notificationSound.js';
 import type { OfficeState } from '../office/engine/officeState.js';
@@ -83,6 +83,10 @@ export function useExtensionMessages(
 
   // Track whether initial layout has been loaded (ref to avoid re-render)
   const layoutReadyRef = useRef(false);
+  const notifyLayoutLoaded = useEffectEvent((layout: OfficeLayout) => {
+    onLayoutLoaded?.(layout);
+  });
+  const getEditDirty = useEffectEvent(() => isEditDirty?.() ?? false);
 
   useEffect(() => {
     // Buffer agents from existingAgents until layout is loaded
@@ -100,7 +104,7 @@ export function useExtensionMessages(
 
       if (msg.type === 'layoutLoaded') {
         // Skip external layout updates while editor has unsaved changes
-        if (layoutReadyRef.current && isEditDirty?.()) {
+        if (layoutReadyRef.current && getEditDirty()) {
           console.log('[Webview] Skipping external layout update — editor has unsaved changes');
           return;
         }
@@ -108,10 +112,10 @@ export function useExtensionMessages(
         const layout = rawLayout && rawLayout.version === 1 ? migrateLayoutColors(rawLayout) : null;
         if (layout) {
           os.rebuildFromLayout(layout);
-          onLayoutLoaded?.(layout);
+          notifyLayoutLoaded(layout);
         } else {
           // Default layout — snapshot whatever OfficeState built
-          onLayoutLoaded?.(os.getLayout());
+          notifyLayoutLoaded(os.getLayout());
         }
         // Add buffered agents now that layout (and seats) are correct
         for (const p of pendingAgents) {

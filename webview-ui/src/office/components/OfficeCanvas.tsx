@@ -353,13 +353,12 @@ export function OfficeCanvas({
       if (isEditMode) {
         const tile = screenToTile(e.clientX, e.clientY);
         if (tile) {
-          editorState.ghostCol = tile.col;
-          editorState.ghostRow = tile.row;
+          editorState.setGhostPosition(tile.col, tile.row);
 
           // Drag-to-move: check if cursor moved to different tile
           if (editorState.dragUid && !editorState.isDragMoving) {
             if (tile.col !== editorState.dragStartCol || tile.row !== editorState.dragStartRow) {
-              editorState.isDragMoving = true;
+              editorState.setDragMoving(true);
             }
           }
 
@@ -391,8 +390,7 @@ export function OfficeCanvas({
             }
           }
         } else {
-          editorState.ghostCol = -1;
-          editorState.ghostRow = -1;
+          editorState.setGhostPosition(-1, -1);
         }
 
         // Cursor: show grab during drag, pointer over delete button, crosshair otherwise
@@ -453,7 +451,7 @@ export function OfficeCanvas({
       if (!pos) return;
       const hitId = officeState.getCharacterAt(pos.worldX, pos.worldY);
       const tile = screenToTile(e.clientX, e.clientY);
-      officeState.hoveredTile = tile;
+      officeState.setHoveredTile(tile);
       const canvas = canvasRef.current;
       if (canvas) {
         let cursor = 'default';
@@ -474,7 +472,7 @@ export function OfficeCanvas({
         }
         canvas.style.cursor = cursor;
       }
-      officeState.hoveredAgentId = hitId;
+      officeState.setHoveredAgentId(hitId);
     },
     [
       officeState,
@@ -498,7 +496,7 @@ export function OfficeCanvas({
       if (e.button === 1) {
         e.preventDefault();
         // Break camera follow on manual pan
-        officeState.cameraFollowId = null;
+        officeState.setCameraFollowId(null);
         isPanningRef.current = true;
         panStartRef.current = {
           mouseX: e.clientX,
@@ -583,7 +581,7 @@ export function OfficeCanvas({
       }
 
       // Non-select tools: start paint drag
-      editorState.isDragging = true;
+      editorState.setDragging(true);
       if (tile) {
         onEditorTileAction(tile.col, tile.row);
       }
@@ -645,7 +643,7 @@ export function OfficeCanvas({
           if (editorState.selectedFurnitureUid === editorState.dragUid) {
             editorState.clearSelection();
           } else {
-            editorState.selectedFurnitureUid = editorState.dragUid;
+            editorState.setSelectedFurnitureUid(editorState.dragUid);
           }
         }
         editorState.clearDrag();
@@ -655,8 +653,8 @@ export function OfficeCanvas({
         return;
       }
 
-      editorState.isDragging = false;
-      editorState.wallDragAdding = null;
+      editorState.setDragging(false);
+      editorState.setWallDragAdding(null);
     },
     [editorState, isEditMode, officeState, onDragMove, onEditorSelectionChange],
   );
@@ -673,11 +671,11 @@ export function OfficeCanvas({
         officeState.dismissBubble(hitId);
         // Toggle selection: click same agent deselects, different agent selects
         if (officeState.selectedAgentId === hitId) {
-          officeState.selectedAgentId = null;
-          officeState.cameraFollowId = null;
+          officeState.setSelectedAgentId(null);
+          officeState.setCameraFollowId(null);
         } else {
-          officeState.selectedAgentId = hitId;
-          officeState.cameraFollowId = hitId;
+          officeState.setSelectedAgentId(hitId);
+          officeState.setCameraFollowId(hitId);
         }
         onClick(hitId); // still focus terminal
         return;
@@ -697,14 +695,14 @@ export function OfficeCanvas({
                 if (selectedCh.seatId === seatId) {
                   // Clicked own seat — send agent back to it
                   officeState.sendToSeat(officeState.selectedAgentId);
-                  officeState.selectedAgentId = null;
-                  officeState.cameraFollowId = null;
+                  officeState.setSelectedAgentId(null);
+                  officeState.setCameraFollowId(null);
                   return;
                 } else if (!seat.assigned) {
                   // Clicked available seat — reassign
                   officeState.reassignSeat(officeState.selectedAgentId, seatId);
-                  officeState.selectedAgentId = null;
-                  officeState.cameraFollowId = null;
+                  officeState.setSelectedAgentId(null);
+                  officeState.setCameraFollowId(null);
                   // Persist seat assignments (exclude sub-agents)
                   const seats: Record<number, { palette: number; seatId: string | null }> = {};
                   for (const ch of officeState.characters.values()) {
@@ -719,8 +717,8 @@ export function OfficeCanvas({
           }
         }
         // Clicked empty space — deselect
-        officeState.selectedAgentId = null;
-        officeState.cameraFollowId = null;
+        officeState.setSelectedAgentId(null);
+        officeState.setCameraFollowId(null);
       }
     },
     [officeState, onClick, screenToWorld, screenToTile, isEditMode],
@@ -729,13 +727,12 @@ export function OfficeCanvas({
   const handleMouseLeave = useCallback(() => {
     isPanningRef.current = false;
     isEraseDraggingRef.current = false;
-    editorState.isDragging = false;
-    editorState.wallDragAdding = null;
+    editorState.setDragging(false);
+    editorState.setWallDragAdding(null);
     editorState.clearDrag();
-    editorState.ghostCol = -1;
-    editorState.ghostRow = -1;
-    officeState.hoveredAgentId = null;
-    officeState.hoveredTile = null;
+    editorState.setGhostPosition(-1, -1);
+    officeState.setHoveredAgentId(null);
+    officeState.setHoveredTile(null);
   }, [officeState, editorState]);
 
   const handleContextMenu = useCallback(
@@ -771,7 +768,7 @@ export function OfficeCanvas({
       } else {
         // Pan via trackpad two-finger scroll or mouse wheel
         const dpr = window.devicePixelRatio || 1;
-        officeState.cameraFollowId = null;
+        officeState.setCameraFollowId(null);
         panRef.current = clampPan(
           panRef.current.x - e.deltaX * dpr,
           panRef.current.y - e.deltaY * dpr,
