@@ -1,3 +1,3 @@
-declare function acquireVsCodeApi(): { postMessage(msg: unknown): void }
+declare function acquireVsCodeApi(): { postMessage(msg: unknown): void };
 
-export const vscode = acquireVsCodeApi()
+export const vscode = acquireVsCodeApi();
