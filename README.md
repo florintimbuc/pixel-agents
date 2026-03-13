@@ -111,17 +111,6 @@ There are several areas where contributions would be very welcome:
 
 If any of these interest you, feel free to open an issue or submit a PR.
 
-## Publishing
-
-Releases are published via GitHub Actions to both VS Code Marketplace and Open VSX.
-
-Required repository secrets:
-
-- `VSCE_PAT` — Personal Access Token for VS Code Marketplace publishing
-- `OPEN_VSX_TOKEN` — Access token for Open VSX publishing
-
-Publishing triggers on a GitHub release (`published`) or manually via workflow dispatch.
-
 ## Contributions
 
 See [CONTRIBUTORS.md](CONTRIBUTORS.md) for instructions on how to contribute to this project.

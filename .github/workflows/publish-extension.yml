@@ -27,14 +27,17 @@ jobs:
         run: npm ci
         working-directory: webview-ui
 
-      - name: Publish to VS Code Marketplace
-        uses: HaaLeo/publish-vscode-extension@v2
-        with:
-          pat: ${{ secrets.VSCE_PAT }}
-          registryUrl: https://marketplace.visualstudio.com
+       - name: Publish to VS Code Marketplace
+         id: publish-vscode
+         uses: HaaLeo/publish-vscode-extension@v2
+         with:
+           pat: ${{ secrets.VSCE_PAT }}
+           registryUrl: https://marketplace.visualstudio.com
 
-      - name: Publish to Open VSX
-        uses: HaaLeo/publish-vscode-extension@v2
-        with:
-          pat: ${{ secrets.OPEN_VSX_TOKEN }}
-          registryUrl: https://open-vsx.org
+       - name: Publish to Open VSX
+         uses: HaaLeo/publish-vscode-extension@v2
+         with:
+           pat: ${{ secrets.OPEN_VSX_TOKEN }}
+           registryUrl: https://open-vsx.org
+           extensionFile: ${{ steps.publish-vscode.outputs.vsixPath }}
+ 
