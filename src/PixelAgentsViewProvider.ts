@@ -32,6 +32,9 @@ import {
   WORKSPACE_KEY_AGENT_SEATS,
 } from './constants.js';
 import { ensureProjectScan } from './fileWatcher.js';
+import { HookEventHandler } from './hookEventHandler.js';
+import { installHooks } from './hookInstaller.js';
+import { HookServer } from './hookServer.js';
 import type { LayoutWatcher } from './layoutPersistence.js';
 import { readLayoutFromFile, watchLayoutFile, writeLayoutToFile } from './layoutPersistence.js';
 import type { AgentState } from './types.js';
@@ -63,7 +66,14 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
   // Cross-window layout sync
   layoutWatcher: LayoutWatcher | null = null;
 
-  constructor(private readonly context: vscode.ExtensionContext) {}
+  // Claude Code Hooks
+  private hookServer: HookServer | null = null;
+  private hookEventHandler: HookEventHandler | null = null;
+  private hooksReady = false;
+
+  constructor(private readonly context: vscode.ExtensionContext) {
+    this.initHooks();
+  }
 
   private get extensionUri(): vscode.Uri {
     return this.context.extensionUri;
@@ -77,6 +87,49 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
     persistAgents(this.agents, this.context);
   };
 
+  private initHooks(): void {
+    this.hookEventHandler = new HookEventHandler(
+      this.agents,
+      this.waitingTimers,
+      this.permissionTimers,
+      () => this.webview,
+    );
+
+    this.hookServer = new HookServer();
+    this.hookServer.onEvent((event) => {
+      this.hookEventHandler?.handleEvent(event);
+    });
+
+    this.hookServer
+      .start()
+      .then(() => {
+        installHooks();
+        this.hooksReady = true;
+        // Preemptively mark all existing agents as hook-enabled
+        for (const agent of this.agents.values()) {
+          agent.hookDelivered = true;
+        }
+      })
+      .catch((e) => {
+        console.error(`[Pixel Agents] Failed to start hook server: ${e}`);
+      });
+  }
+
+  /** Register an agent with the hook event handler for session→agent mapping.
+   *  Preemptively sets hookDelivered if the hook infrastructure is ready,
+   *  so heuristic timers are suppressed from the start (no first-turn race). */
+  registerAgentHook(agent: AgentState): void {
+    this.hookEventHandler?.registerAgent(agent.sessionId, agent.id);
+    if (this.hooksReady) {
+      agent.hookDelivered = true;
+    }
+  }
+
+  /** Unregister an agent from the hook event handler */
+  unregisterAgentHook(agent: AgentState): void {
+    this.hookEventHandler?.unregisterAgent(agent.sessionId);
+  }
+
   resolveWebviewView(webviewView: vscode.WebviewView) {
     this.webviewView = webviewView;
     webviewView.webview.options = { enableScripts: true };
@@ -84,6 +137,7 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
 
     webviewView.webview.onDidReceiveMessage(async (message) => {
       if (message.type === 'openClaude') {
+        const prevAgentIds = new Set(this.agents.keys());
         await launchNewTerminal(
           this.nextAgentId,
           this.nextTerminalIndex,
@@ -101,6 +155,12 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
           message.folderPath as string | undefined,
           message.bypassPermissions as boolean | undefined,
         );
+        // Register newly created agent(s) with hook handler
+        for (const [id, agent] of this.agents) {
+          if (!prevAgentIds.has(id)) {
+            this.registerAgentHook(agent);
+          }
+        }
       } else if (message.type === 'focusAgent') {
         const agent = this.agents.get(message.id);
         if (agent) {
@@ -137,6 +197,10 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
           this.webview,
           this.persistAgents,
         );
+        // Register all restored agents with hook handler
+        for (const agent of this.agents.values()) {
+          this.registerAgentHook(agent);
+        }
         // Send persisted settings to webview
         const soundEnabled = this.context.globalState.get<boolean>(GLOBAL_KEY_SOUND_ENABLED, true);
         const config = readConfig();
@@ -173,6 +237,7 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
           this.permissionTimers,
           this.webview,
           this.persistAgents,
+          (agent) => this.registerAgentHook(agent),
         );
 
         // Load furniture assets BEFORE sending layout
@@ -362,6 +427,7 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
           if (this.activeAgentId.current === id) {
             this.activeAgentId.current = null;
           }
+          this.unregisterAgentHook(agent);
           removeAgent(
             id,
             this.agents,
@@ -448,6 +514,10 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
   }
 
   dispose() {
+    this.hookServer?.stop();
+    this.hookServer = null;
+    this.hookEventHandler?.dispose();
+    this.hookEventHandler = null;
     this.layoutWatcher?.dispose();
     this.layoutWatcher = null;
     for (const id of [...this.agents.keys()]) {
