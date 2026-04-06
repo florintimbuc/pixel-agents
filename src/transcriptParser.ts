@@ -159,6 +159,24 @@ export function processTranscriptLine(
             if (!PERMISSION_EXEMPT_TOOLS.has(toolName)) {
               hasNonExemptTool = true;
             }
+            // Detect tmux vs inline team mode from Agent tool's run_in_background flag
+            if (
+              agent.teamName &&
+              toolName === 'Agent' &&
+              block.input?.run_in_background === true &&
+              !agent.teamUsesTmux
+            ) {
+              agent.teamUsesTmux = true;
+              webview?.postMessage({
+                type: 'agentTeamInfo',
+                id: agentId,
+                teamName: agent.teamName,
+                agentName: agent.agentName,
+                isTeamLead: agent.isTeamLead,
+                leadAgentId: agent.leadAgentId,
+                teamUsesTmux: true,
+              });
+            }
             // Skip webview message when hooks handle tool visuals (PreToolUse sent it instantly)
             if (!agent.hookDelivered) {
               webview?.postMessage({

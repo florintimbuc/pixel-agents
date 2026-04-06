@@ -389,12 +389,14 @@ export class HookEventHandler {
     agent.hadToolsInTurn = true;
 
     // Send tool start + active state to webview (instant, no 500ms JSONL delay)
+    const runInBackground = toolInput.run_in_background === true;
     webview?.postMessage({
       type: 'agentToolStart',
       id: agentId,
       toolId: hookToolId,
       status,
       toolName,
+      runInBackground,
     });
     webview?.postMessage({
       type: 'agentStatus',
