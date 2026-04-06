@@ -185,6 +185,25 @@ export class HookEventHandler {
               return;
             }
           }
+          // Fallback: SessionEnd may not fire before SessionStart(source=resume) on some
+          // platforms (observed on macOS). Match by projectDir alone, targeting agents that
+          // haven't received any JSONL data yet (still polling for their original session file).
+          if (event.source === 'resume') {
+            for (const [id, agent] of this.agents) {
+              const dirMatch =
+                path.resolve(agent.projectDir).toLowerCase() ===
+                path.resolve(projectDir).toLowerCase();
+              if (dirMatch && agent.linesProcessed === 0) {
+                console.log(
+                  `[Pixel Agents] Hook: Agent ${id} - /resume fallback (no SessionEnd), reassigning to ${event.session_id}`,
+                );
+                this.sessionToAgentId.delete(agent.sessionId);
+                this.registerAgent(event.session_id, id);
+                this.lifecycleCallbacks.onSessionClear?.(id, event.session_id, transcriptPath);
+                return;
+              }
+            }
+          }
         }
       }
       // Unknown session -- store as pending, create only when a confirmation event
