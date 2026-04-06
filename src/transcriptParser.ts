@@ -179,6 +179,9 @@ export function processTranscriptLine(
             }
             // Skip webview message when hooks handle tool visuals (PreToolUse sent it instantly)
             if (!agent.hookDelivered) {
+              const runInBackground =
+                (toolName === 'Agent' || toolName === 'Task') &&
+                block.input?.run_in_background === true;
               webview?.postMessage({
                 type: 'agentToolStart',
                 id: agentId,
@@ -186,6 +189,7 @@ export function processTranscriptLine(
                 status,
                 toolName,
                 permissionActive: agent.permissionSent,
+                runInBackground,
               });
             }
           }
