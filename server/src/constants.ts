@@ -43,7 +43,11 @@ export const SERVER_JSON_NAME = 'server.json';
 export const HOOK_SCRIPTS_DIR = '.pixel-agents/hooks';
 /** Output filename after esbuild compiles claude-hook.ts to CJS (source is .ts, output is .js) */
 export const CLAUDE_HOOK_SCRIPT_NAME = 'claude-hook.js';
+export const HEALTH_API_PATH = '/api/health';
 export const HOOK_API_PREFIX = '/api/hooks';
+export const HOOK_API_PATH_TEMPLATE = `${HOOK_API_PREFIX}/{providerId}`;
+export const PROVIDER_ID_REGEX = /^[a-z0-9-]+$/;
+export const PROVIDER_ID_PATTERN = PROVIDER_ID_REGEX.source;
 
 /** Hook events to install in ~/.claude/settings.json.
  *  SessionStart/SessionEnd handle session lifecycle (start, /clear, resume, exit).

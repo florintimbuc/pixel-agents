@@ -42,3 +42,16 @@ echo "✅ No secrets detected"
 
 echo "🎨 Formatting staged files..."
 npm exec -- lint-staged
+
+echo "🧾 Generating OpenAPI spec..."
+npm run generate:openapi
+
+# Alternatively, we can always stage openapi.json or openapi.json needs to be made public somewhere else, e.g. pixel-agent-docs
+if ! git diff --exit-code -- server/openapi.json > /dev/null 2>&1; then
+  echo ""
+  echo "❌ server/openapi.json changed after generation"
+  echo ""
+  echo "Run npm run generate:openapi and stage the updated file before committing."
+  echo ""
+  exit 1
+fi

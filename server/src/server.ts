@@ -5,8 +5,10 @@ import * as os from 'os';
 import * as path from 'path';
 
 import {
+  HEALTH_API_PATH,
   HOOK_API_PREFIX,
   MAX_HOOK_BODY_SIZE,
+  PROVIDER_ID_REGEX,
   SERVER_JSON_DIR,
   SERVER_JSON_NAME,
 } from './constants.js';
@@ -138,7 +140,7 @@ export class PixelAgentsServer {
     }
 
     // Health endpoint (no auth required)
-    if (req.method === 'GET' && url === '/api/health') {
+    if (req.method === 'GET' && url === HEALTH_API_PATH) {
       addCorsHeaders(res);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(
@@ -182,7 +184,7 @@ export class PixelAgentsServer {
 
     // Extract and validate provider ID from URL: /api/hooks/claude -> "claude"
     const providerId = url.slice(HOOK_API_PREFIX.length + 1);
-    if (!providerId || !/^[a-z0-9-]+$/.test(providerId)) {
+    if (!providerId || !PROVIDER_ID_REGEX.test(providerId)) {
       res.writeHead(400);
       res.end('invalid provider id');
       return;
