@@ -5,8 +5,10 @@ import * as os from 'os';
 import * as path from 'path';
 
 import {
+  HEALTH_API_PATH,
   HOOK_API_PREFIX,
   MAX_HOOK_BODY_SIZE,
+  PROVIDER_ID_REGEX,
   SERVER_JSON_DIR,
   SERVER_JSON_NAME,
 } from './constants.js';
@@ -129,8 +131,17 @@ export class PixelAgentsServer {
   private handleRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
     const url = req.url ?? '';
 
+    // CORS preflight — browsers send OPTIONS before cross-origin POST/GET with custom headers
+    if (req.method === 'OPTIONS') {
+      addCorsHeaders(res);
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
     // Health endpoint (no auth required)
-    if (req.method === 'GET' && url === '/api/health') {
+    if (req.method === 'GET' && url === HEALTH_API_PATH) {
+      addCorsHeaders(res);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(
         JSON.stringify({
@@ -158,6 +169,8 @@ export class PixelAgentsServer {
     res: http.ServerResponse,
     url: string,
   ): void {
+    addCorsHeaders(res);
+
     // Validate auth token (timing-safe comparison prevents side-channel attacks)
     const authHeader = req.headers['authorization'] ?? '';
     const expectedToken = `Bearer ${this.config?.token ?? ''}`;
@@ -171,7 +184,7 @@ export class PixelAgentsServer {
 
     // Extract and validate provider ID from URL: /api/hooks/claude -> "claude"
     const providerId = url.slice(HOOK_API_PREFIX.length + 1);
-    if (!providerId || !/^[a-z0-9-]+$/.test(providerId)) {
+    if (!providerId || !PROVIDER_ID_REGEX.test(providerId)) {
       res.writeHead(400);
       res.end('invalid provider id');
       return;
@@ -259,6 +272,16 @@ export class PixelAgentsServer {
       // File may already be gone
     }
   }
+}
+
+/**
+ * Add CORS headers to allow browser fetch() calls from local dev servers and docs pages.
+ * The server only binds to 127.0.0.1 so cross-origin requests only come from local origins.
+ */
+function addCorsHeaders(res: http.ServerResponse): void {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 }
 
 /** Check if a process is alive by sending signal 0 (no-op, just checks existence). */

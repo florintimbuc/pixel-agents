@@ -1,0 +1,620 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Pixel Agents Hooks Server",
+    "version": "1.0.0",
+    "description": "Local HTTP server that receives hook events from CLI tool hook scripts and routes them to the VS Code extension. Runs on 127.0.0.1 at a random port; port, PID, and auth token are published to ~/.pixel-agents/server.json for hook script discovery."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:{port}",
+      "description": "Local server — port is assigned at startup and published to ~/.pixel-agents/server.json",
+      "variables": {
+        "port": {
+          "default": "0",
+          "description": "Dynamic port assigned at startup. Read from ~/.pixel-agents/server.json."
+        }
+      }
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Auth token from ~/.pixel-agents/server.json. Validated with a timing-safe comparison to prevent side-channel attacks."
+      }
+    },
+    "schemas": {
+      "HookEventBase": {
+        "type": "object",
+        "required": [
+          "hook_event_name",
+          "session_id"
+        ],
+        "properties": {
+          "hook_event_name": {
+            "type": "string",
+            "description": "Name of the hook event"
+          },
+          "session_id": {
+            "type": "string",
+            "description": "Claude Code session ID. Maps to a JSONL transcript filename."
+          }
+        }
+      },
+      "SessionStartEvent": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/HookEventBase"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "hook_event_name": {
+                "type": "string",
+                "enum": [
+                  "SessionStart"
+                ]
+              },
+              "source": {
+                "type": "string",
+                "enum": [
+                  "new",
+                  "clear",
+                  "resume"
+                ],
+                "description": "How the session was initiated. `new` = fresh start, `clear` = after /clear command, `resume` = after --resume flag."
+              },
+              "transcript_path": {
+                "type": "string",
+                "description": "Absolute path to the JSONL transcript file for this session."
+              },
+              "cwd": {
+                "type": "string",
+                "description": "Working directory of the Claude Code process."
+              }
+            }
+          }
+        ]
+      },
+      "SessionEndEvent": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/HookEventBase"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "hook_event_name": {
+                "type": "string",
+                "enum": [
+                  "SessionEnd"
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "exit",
+                  "logout",
+                  "clear",
+                  "resume",
+                  "prompt_input_exit"
+                ],
+                "description": "Why the session ended. `clear` and `resume` expect a follow-up SessionStart. All others are final."
+              }
+            }
+          }
+        ]
+      },
+      "StopEvent": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/HookEventBase"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "hook_event_name": {
+                "type": "string",
+                "enum": [
+                  "Stop"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "PermissionRequestEvent": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/HookEventBase"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "hook_event_name": {
+                "type": "string",
+                "enum": [
+                  "PermissionRequest"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "NotificationEvent": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/HookEventBase"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "hook_event_name": {
+                "type": "string",
+                "enum": [
+                  "Notification"
+                ]
+              },
+              "notification_type": {
+                "type": "string",
+                "enum": [
+                  "permission_prompt",
+                  "idle_prompt"
+                ],
+                "description": "`permission_prompt` = agent needs approval to proceed. `idle_prompt` = agent is waiting for user input."
+              }
+            }
+          }
+        ]
+      },
+      "UserPromptSubmitEvent": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/HookEventBase"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "hook_event_name": {
+                "type": "string",
+                "enum": [
+                  "UserPromptSubmit"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "PreToolUseEvent": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/HookEventBase"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "hook_event_name": {
+                "type": "string",
+                "enum": [
+                  "PreToolUse"
+                ]
+              },
+              "tool_name": {
+                "type": "string",
+                "description": "Name of the tool about to be executed (e.g., Read, Write, Bash)."
+              },
+              "tool_input": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "Tool-specific input parameters."
+              }
+            }
+          }
+        ]
+      },
+      "PostToolUseEvent": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/HookEventBase"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "hook_event_name": {
+                "type": "string",
+                "enum": [
+                  "PostToolUse"
+                ]
+              },
+              "tool_name": {
+                "type": "string",
+                "description": "Name of the tool that was executed."
+              }
+            }
+          }
+        ]
+      },
+      "PostToolUseFailureEvent": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/HookEventBase"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "hook_event_name": {
+                "type": "string",
+                "enum": [
+                  "PostToolUseFailure"
+                ]
+              },
+              "tool_name": {
+                "type": "string",
+                "description": "Name of the tool that failed."
+              }
+            }
+          }
+        ]
+      },
+      "SubagentStartEvent": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/HookEventBase"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "hook_event_name": {
+                "type": "string",
+                "enum": [
+                  "SubagentStart"
+                ]
+              },
+              "agent_type": {
+                "type": "string",
+                "description": "Type/name of the sub-agent being spawned."
+              }
+            }
+          }
+        ]
+      },
+      "SubagentStopEvent": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/HookEventBase"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "hook_event_name": {
+                "type": "string",
+                "enum": [
+                  "SubagentStop"
+                ]
+              },
+              "agent_type": {
+                "type": "string",
+                "description": "Type/name of the sub-agent that stopped."
+              }
+            }
+          }
+        ]
+      },
+      "HookEvent": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SessionStartEvent"
+          },
+          {
+            "$ref": "#/components/schemas/SessionEndEvent"
+          },
+          {
+            "$ref": "#/components/schemas/StopEvent"
+          },
+          {
+            "$ref": "#/components/schemas/PermissionRequestEvent"
+          },
+          {
+            "$ref": "#/components/schemas/NotificationEvent"
+          },
+          {
+            "$ref": "#/components/schemas/UserPromptSubmitEvent"
+          },
+          {
+            "$ref": "#/components/schemas/PreToolUseEvent"
+          },
+          {
+            "$ref": "#/components/schemas/PostToolUseEvent"
+          },
+          {
+            "$ref": "#/components/schemas/PostToolUseFailureEvent"
+          },
+          {
+            "$ref": "#/components/schemas/SubagentStartEvent"
+          },
+          {
+            "$ref": "#/components/schemas/SubagentStopEvent"
+          }
+        ],
+        "discriminator": {
+          "propertyName": "hook_event_name"
+        }
+      },
+      "HealthResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "uptime",
+          "pid"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          },
+          "uptime": {
+            "type": "integer",
+            "description": "Server uptime in seconds."
+          },
+          "pid": {
+            "type": "integer",
+            "description": "PID of the process owning the server."
+          }
+        }
+      },
+      "ServerConfig": {
+        "type": "object",
+        "required": [
+          "port",
+          "pid",
+          "token",
+          "startedAt"
+        ],
+        "properties": {
+          "port": {
+            "type": "integer",
+            "description": "Port the HTTP server is listening on."
+          },
+          "pid": {
+            "type": "integer",
+            "description": "PID of the process that owns the server."
+          },
+          "token": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Auth token required in the Authorization header for hook requests."
+          },
+          "startedAt": {
+            "type": "integer",
+            "description": "Unix timestamp (ms) when the server started."
+          }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/api/health": {
+      "get": {
+        "operationId": "getHealth",
+        "summary": "Health check",
+        "description": "Returns server status, uptime, and PID. No authentication required.",
+        "tags": [
+          "Server"
+        ],
+        "responses": {
+          "200": {
+            "description": "Server is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                },
+                "example": {
+                  "status": "ok",
+                  "uptime": 42,
+                  "pid": 12345
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/hooks/{providerId}": {
+      "post": {
+        "operationId": "postHookEvent",
+        "summary": "Submit a hook event",
+        "description": "Delivers a hook event from a CLI tool to the extension. The `providerId` identifies which tool is sending the event (e.g., `claude`). The event is routed to the matching agent by `session_id`.\n\nRequires a valid Bearer token from `~/.pixel-agents/server.json`. Body is limited to 64 KB.",
+        "tags": [
+          "Hooks"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "providerId",
+            "in": "path",
+            "required": true,
+            "description": "Identifier for the hook provider. Must match `[a-z0-9-]+`. The built-in provider is `claude`.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9-]+$"
+            },
+            "example": "claude"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HookEvent"
+              },
+              "examples": {
+                "SessionStart": {
+                  "summary": "Session started",
+                  "value": {
+                    "hook_event_name": "SessionStart",
+                    "session_id": "abc12345-...",
+                    "source": "new",
+                    "transcript_path": "/home/user/.claude/projects/-home-user-myproject/abc12345.jsonl",
+                    "cwd": "/home/user/myproject"
+                  }
+                },
+                "SessionEnd": {
+                  "summary": "Session ended (exit)",
+                  "value": {
+                    "hook_event_name": "SessionEnd",
+                    "session_id": "abc12345-...",
+                    "reason": "exit"
+                  }
+                },
+                "Stop": {
+                  "summary": "Turn completed",
+                  "value": {
+                    "hook_event_name": "Stop",
+                    "session_id": "abc12345-..."
+                  }
+                },
+                "PermissionRequest": {
+                  "summary": "Permission needed",
+                  "value": {
+                    "hook_event_name": "PermissionRequest",
+                    "session_id": "abc12345-..."
+                  }
+                },
+                "Notification_permission": {
+                  "summary": "Notification: permission prompt",
+                  "value": {
+                    "hook_event_name": "Notification",
+                    "session_id": "abc12345-...",
+                    "notification_type": "permission_prompt"
+                  }
+                },
+                "Notification_idle": {
+                  "summary": "Notification: idle prompt",
+                  "value": {
+                    "hook_event_name": "Notification",
+                    "session_id": "abc12345-...",
+                    "notification_type": "idle_prompt"
+                  }
+                },
+                "UserPromptSubmit": {
+                  "summary": "User submitted a prompt",
+                  "value": {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "abc12345-..."
+                  }
+                },
+                "PreToolUse": {
+                  "summary": "Tool about to run",
+                  "value": {
+                    "hook_event_name": "PreToolUse",
+                    "session_id": "abc12345-...",
+                    "tool_name": "Read",
+                    "tool_input": {
+                      "file_path": "/home/user/myproject/src/main.ts"
+                    }
+                  }
+                },
+                "PostToolUse": {
+                  "summary": "Tool finished",
+                  "value": {
+                    "hook_event_name": "PostToolUse",
+                    "session_id": "abc12345-...",
+                    "tool_name": "Read"
+                  }
+                },
+                "PostToolUseFailure": {
+                  "summary": "Tool failed",
+                  "value": {
+                    "hook_event_name": "PostToolUseFailure",
+                    "session_id": "abc12345-...",
+                    "tool_name": "Read"
+                  }
+                },
+                "SubagentStart": {
+                  "summary": "Sub-agent spawned",
+                  "value": {
+                    "hook_event_name": "SubagentStart",
+                    "session_id": "abc12345-...",
+                    "agent_type": "subagent"
+                  }
+                },
+                "SubagentStop": {
+                  "summary": "Sub-agent finished",
+                  "value": {
+                    "hook_event_name": "SubagentStop",
+                    "session_id": "abc12345-...",
+                    "agent_type": "subagent"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Event accepted",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "ok"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid JSON body or invalid provider ID",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or incorrect Authorization header",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "unauthorized"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown endpoint"
+          },
+          "413": {
+            "description": "Request body exceeds 64 KB limit",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "payload too large"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

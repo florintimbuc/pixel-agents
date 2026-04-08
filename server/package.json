@@ -2,6 +2,7 @@
   "name": "pixel-agents",
   "private": true,
   "scripts": {
+    "generate:openapi": "node ../node_modules/tsx/dist/cli.mjs scripts/generate-openapi.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },
