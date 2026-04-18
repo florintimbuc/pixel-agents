@@ -6,6 +6,8 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import Fastify from 'fastify';
 
 import type { AgentStateStore } from './agentStateStore.js';
+import type { AssetCache } from './clientMessageHandler.js';
+import { handleClientMessage } from './clientMessageHandler.js';
 import { HOOK_API_PREFIX, MAX_HOOK_BODY_SIZE } from './constants.js';
 import type { AgentState } from './types.js';
 
@@ -23,6 +25,8 @@ export interface HttpServerOptions {
   store: AgentStateStore;
   /** Path to SPA dist directory for static serving (standalone only) */
   staticDir?: string;
+  /** Cached assets loaded at startup (standalone only) */
+  assetCache?: AssetCache;
   /** Callback when a hook event is received */
   onHookEvent?: (providerId: string, event: Record<string, unknown>) => void;
 }
@@ -170,12 +174,11 @@ function registerWebSocketRoute(app: FastifyInstance, options: HttpServerOptions
     // Handle incoming client messages
     socket.on('message', (data: Buffer | string) => {
       try {
-        const _msg = JSON.parse(data.toString()) as Record<string, unknown>;
-        // ClientMessage dispatch will be handled by clientMessageHandler.ts
-        // For now, log incoming messages in non-embedded mode
-        if (!options.embedded) {
-          console.log('[Pixel Agents] WS client message:', _msg.type);
+        const msg = JSON.parse(data.toString()) as Record<string, unknown>;
+        if (!options.embedded && msg.type) {
+          console.log('[Pixel Agents] WS client message:', msg.type);
         }
+        handleClientMessage(msg, store, (m) => safeSend(socket, m), options.assetCache ?? null);
       } catch {
         // Malformed JSON, ignore
       }

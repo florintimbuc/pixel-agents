@@ -4,7 +4,7 @@ import type { MessageTransport } from './types.js';
 /**
  * WebSocket transport for standalone browser mode.
  * Connects to the Pixel Agents server via WebSocket for bidirectional messaging.
- * Includes automatic reconnection with exponential backoff.
+ * Includes automatic reconnection with exponential backoff and message queuing.
  */
 export class WebSocketTransport implements MessageTransport {
   private ws: WebSocket | null = null;
@@ -13,6 +13,7 @@ export class WebSocketTransport implements MessageTransport {
   private reconnectAttempts = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
+  private pendingMessages: ClientMessage[] = [];
 
   constructor(url: string) {
     this.url = url;
@@ -26,6 +27,11 @@ export class WebSocketTransport implements MessageTransport {
     this.ws.onopen = () => {
       this.reconnectAttempts = 0;
       console.log('[Transport] WebSocket connected');
+      // Flush any messages queued while connecting
+      for (const msg of this.pendingMessages) {
+        this.ws!.send(JSON.stringify(msg));
+      }
+      this.pendingMessages = [];
     };
 
     this.ws.onmessage = (e: MessageEvent) => {
@@ -51,6 +57,9 @@ export class WebSocketTransport implements MessageTransport {
   send(message: ClientMessage): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(message));
+    } else {
+      // Queue messages while connecting (flushed in onopen)
+      this.pendingMessages.push(message);
     }
   }
 
@@ -70,6 +79,7 @@ export class WebSocketTransport implements MessageTransport {
     this.ws?.close();
     this.ws = null;
     this.handlers = [];
+    this.pendingMessages = [];
   }
 
   private scheduleReconnect(): void {

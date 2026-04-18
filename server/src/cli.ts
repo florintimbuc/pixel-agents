@@ -4,12 +4,21 @@
  * Standalone CLI entry point: `npx pixel-agents`
  *
  * Starts the Fastify server in standalone mode with SPA serving and WebSocket.
- * In this mode, the browser UI connects via WebSocket (not VS Code postMessage).
+ * Loads all assets (PNGs -> SpriteData) on startup and caches in memory.
+ * Each connecting WebSocket client receives the full state on webviewReady.
  */
 
 import * as path from 'path';
 
 import { AgentStateStore } from './agentStateStore.js';
+import {
+  loadCharacterSprites,
+  loadDefaultLayout,
+  loadFloorTiles,
+  loadFurnitureAssets,
+  loadWallTiles,
+} from './assetLoader.js';
+import type { AssetCache } from './clientMessageHandler.js';
 import { PixelAgentsServer } from './server.js';
 
 // ── Argument parsing ──────────────────────────────────────────
@@ -46,22 +55,37 @@ Options:
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
 
-  const store = new AgentStateStore();
-  // Future: store.setAdapter(new FileStateAdapter()) for standalone persistence
+  // dist/ contains both the CLI bundle and the assets/ + webview/ directories
+  const distRoot = __dirname;
+  const staticDir = path.join(distRoot, 'webview');
 
+  // ── Load assets on startup (same pipeline as VS Code extension) ──
+  console.log('[Pixel Agents] Loading assets...');
+  const assetCache: AssetCache = {
+    characters: await loadCharacterSprites(distRoot),
+    floorTiles: await loadFloorTiles(distRoot).then((t) => t?.sprites ?? null),
+    wallTiles: await loadWallTiles(distRoot).then((t) => t?.sets ?? null),
+    furniture: await loadFurnitureAssets(distRoot),
+    defaultLayout: loadDefaultLayout(distRoot),
+  };
+  const charCount = assetCache.characters?.characters.length ?? 0;
+  const furnitureCount = assetCache.furniture?.catalog.length ?? 0;
+  console.log(
+    `[Pixel Agents] Assets loaded: ${charCount} characters, ${furnitureCount} furniture items`,
+  );
+
+  // ── Start server ──
+  const store = new AgentStateStore();
   const server = new PixelAgentsServer();
 
   try {
-    // __dirname equivalent for bundled CJS output
-    // When bundled by esbuild to dist/cli.js, __dirname = dist/.
-    // Vite outputs the SPA to dist/webview/.
-    const staticDir = path.join(__dirname, 'webview');
     const config = await server.start({
       store,
       embedded: false,
       host: args.host,
       port: args.port,
       staticDir,
+      assetCache,
     });
 
     console.log(`\n  Pixel Agents server running at http://${args.host}:${config.port}\n`);
@@ -70,7 +94,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Graceful shutdown
+  // ── Graceful shutdown ──
   function shutdown(): void {
     console.log('\nShutting down...');
     server.stop();

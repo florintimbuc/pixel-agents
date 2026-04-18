@@ -5,6 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 
 import type { AgentStateStore } from './agentStateStore.js';
+import type { AssetCache } from './clientMessageHandler.js';
 import { SERVER_JSON_DIR, SERVER_JSON_NAME } from './constants.js';
 import { createHttpServer } from './httpServer.js';
 
@@ -57,6 +58,7 @@ export class PixelAgentsServer {
     host?: string;
     port?: number;
     staticDir?: string;
+    assetCache?: AssetCache;
   }): Promise<ServerConfig> {
     // Check if another instance already has a server running
     const existing = this.readServerJson();
@@ -80,6 +82,7 @@ export class PixelAgentsServer {
       token,
       store: store!,
       staticDir: options?.staticDir,
+      assetCache: options?.assetCache,
       onHookEvent: (providerId, event) => this.callback?.(providerId, event),
     });
 
