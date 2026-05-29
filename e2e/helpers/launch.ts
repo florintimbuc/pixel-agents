@@ -100,8 +100,18 @@ export async function launchVSCode(testTitle: string): Promise<VSCodeSession> {
         stdio: 'ignore',
         env: { ...process.env, HOME: tmpHome },
       });
-    } catch {
-      // keychain creation failure is non-fatal, test may still work
+    } catch (error) {
+      // Keychain creation is non-fatal (the safeStorage dialog may or may not block tests),
+      // but we want a breadcrumb when CI starts failing in mysterious ways.
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[e2e] Keychain creation failed for ${keychainPath}: ${message}`);
+      try {
+        const launchLog = path.join(tmpHome, '.claude-mock', 'launch.log');
+        fs.mkdirSync(path.dirname(launchLog), { recursive: true });
+        fs.appendFileSync(launchLog, `${new Date().toISOString()} keychain-error: ${message}\n`);
+      } catch {
+        // launch-log write failure is itself non-fatal
+      }
     }
   }
 

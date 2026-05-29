@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { launchVSCode, type VSCodeSession, waitForWorkbench } from '../helpers/launch';
+import { killTrackedExternalProcesses } from '../helpers/mock-claude';
 import { getPixelAgentsFrame, openPixelAgentsPanel } from '../helpers/webview';
 
 const ATTACH_VIDEOS_ON_SUCCESS = process.env['PIXEL_AGENTS_E2E_ATTACH_VIDEOS_ON_SUCCESS'] === '1';
@@ -99,6 +100,10 @@ export const test = base.extend<{ pixelAgents: PixelAgentsContext }>({
       }
 
       const attachRunVideo = runVideo !== null && shouldAttachRunVideo(testInfo);
+      // Kill any leaked mock-claude processes spawned via spawnExternalClaudeScenario
+      // BEFORE tearing down the session (and deleting tmpHome). Otherwise leaked
+      // processes accumulate across the suite and add real environmental pressure.
+      await killTrackedExternalProcesses();
       await session.cleanup();
 
       if (attachRunVideo && runVideo) {

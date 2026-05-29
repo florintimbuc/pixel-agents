@@ -32,9 +32,11 @@ allure-report/
 !.env.example
 
 # Project-specific
-.claude/
+.claude
+.mcp.json
 /sprites-export
 .vercel/
+agent-orchestrator.yaml
 
 # Local notes (not for commit)
 /notes/

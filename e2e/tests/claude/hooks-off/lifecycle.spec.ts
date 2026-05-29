@@ -35,6 +35,7 @@ import {
   buildTeamMetadataRecord,
   buildTurnDurationRecord,
   buildUserToolResultBatchRecord,
+  buildUserToolResultRecord,
   seedTeamConfig,
 } from '../../../helpers/team';
 import { getPixelAgentsFrame, openPixelAgentsPanel, setSettings } from '../../../helpers/webview';
@@ -103,15 +104,61 @@ test.describe('Hooks OFF / Lifecycle', () => {
     expect(await readAgentOverlayIds(panelFrame)).toEqual([originalAgentId]);
   });
 
-  // B3 internal resume reassignment within grace: deleted.
+  // B3: heuristic /resume reassignment at agent startup.
   //
-  // The test exercised the heuristic resume-reassignment path (no SessionStart
-  // hook to drive it). That path was intentionally dropped in v1.1: the per-agent
-  // /clear detection now requires the literal "/clear</command-name>" substring
-  // in the new JSONL (see fileWatcher.ts: "Dropped 'last-prompt' check because
-  // it also appears in --resume sessions"). The hooks-ON counterpart in
-  // hooks-on/lifecycle.spec.ts covers resume via SessionEndResume +
-  // SessionStartResume hooks, which is the supported path.
+  // Scenario: user clicks + Agent → terminal runs `claude --session-id <UUID>`,
+  // but the user actually types /resume (or claude --resume) so the session
+  // generates a DIFFERENT id and writes to <other-id>.jsonl. The expected
+  // <UUID>.jsonl never materializes. The heuristic in
+  // adapters/vscode/agentManager.ts:177-211 polls for the expected file at 1Hz;
+  // when pollCount > 10 and the expected file still doesn't exist, it scans the
+  // project dir for any jsonl modified after agent creation and reassigns the
+  // agent to the newest candidate.
+  //
+  // This test was previously deferred under the rationale that "heuristic
+  // resume detection was dropped in v1.1." That was incorrect — only the
+  // /clear last-prompt disambiguator was tightened (now requires the literal
+  // "/clear</command-name>" substring, see fileWatcher.ts:150-152); the
+  // /resume detection path in agentManager survived and remains active.
+  test('B3 internal resume reassignment within grace', async ({ pixelAgents }) => {
+    const { frame, window, tmpHome, workspaceDir, mockLogFile } = pixelAgents;
+
+    await setSettings(frame, {
+      watchAllSessions: false,
+      hooksEnabled: false,
+      alwaysShowLabels: true,
+      debugView: false,
+    });
+
+    await arrangeNextClaudeInvocation(
+      tmpHome,
+      claudeScenario('B3 internal resume reassignment hooks off')
+        .withoutAutoInit()
+        .defineSession('replacement', '{{sessionId}}-resume')
+        .at(11_000)
+        .appendJsonl(mockClaudeInitRecord('mock-claude-resume-ready'), {
+          session: 'replacement',
+        })
+        .at(11_500)
+        .appendJsonl(
+          buildAssistantToolUseRecord('toolu-b3-fresh', 'Bash', {
+            command: 'npm test',
+          }),
+          { session: 'replacement' },
+        )
+        .holdOpenFor(16_000)
+        .build(),
+    );
+
+    await spawnInternalAgentAndWaitForInvocation(frame, tmpHome, workspaceDir, mockLogFile);
+    await openPixelAgentsPanel(window);
+    const panelFrame = await getPixelAgentsFrame(window);
+    const originalAgentId = await expectSingleAgentOverlay(panelFrame);
+
+    await expectOverlayVisible(panelFrame, 'Running: npm test', 16_000);
+    await expectOverlayCount(panelFrame, 1);
+    expect(await readAgentOverlayIds(panelFrame)).toEqual([originalAgentId]);
+  });
 
   test('B2 clear edge with another agent in the same projectDir', async ({ pixelAgents }) => {
     const { frame, window, tmpHome, mockLogFile } = pixelAgents;
@@ -350,6 +397,8 @@ test.describe('Hooks OFF / Lifecycle', () => {
     await expectOverlayCount(panelFrame, 1, 12_000);
     await expectNoOverlayWithTexts(panelFrame, [INLINE_TEAMMATE_ROLE], 2_000);
 
+    // Stability check (heuristic mode): after the 1s team-config polling
+    // removes the teammate, ensure it stays removed under continued polling.
     await panelFrame.waitForTimeout(8_000);
     await expectOverlayCount(panelFrame, 1);
     await expectNoOverlayWithTexts(panelFrame, [INLINE_TEAMMATE_ROLE], 2_000);
@@ -469,8 +518,175 @@ test.describe('Hooks OFF / Lifecycle', () => {
     expect(newAgentId).toBeDefined();
     expect(newAgentId).not.toBe(oldAgentId);
 
+    // Stability check (heuristic mode): cover several external scanner ticks
+    // (3s interval) to ensure the dismissed JSONL is not re-adopted.
     await frame.waitForTimeout(8_000);
     await expectNoOverlay(frame, 'Running: npm run old-stale', 2_000);
     await expectOverlayCount(frame, 1);
+  });
+
+  test('B8 external basic subagent with run_in_background true but no teamName', async ({
+    pixelAgents,
+  }) => {
+    const { frame, tmpHome, workspaceDir, mockLogFile } = pixelAgents;
+
+    await setSettings(frame, {
+      watchAllSessions: true,
+      hooksEnabled: false,
+      alwaysShowLabels: true,
+      debugView: false,
+    });
+
+    // Heuristic mode mirror of hooks-on/lifecycle B8: external session with an
+    // Agent tool_use that carries run_in_background=true but the lead has NO
+    // teamName. The regression case is misrouting this to the teammate path,
+    // which would produce an extra "general-purpose" teammate overlay alongside
+    // the basic Subtask sub-character.
+    await spawnExternalClaudeScenario({
+      tmpHome,
+      workspaceDir,
+      mockLogFile,
+      sessionId: 'b8-hooks-off-basic',
+      scenario: claudeScenario('B8 external basic subagent no teamName hooks off')
+        .at(1_000)
+        .appendJsonl(
+          buildAssistantToolUseRecord('toolu-b8-off-agent', 'Agent', {
+            description: 'Background basic subtask',
+            run_in_background: true,
+          }),
+        )
+        .at(4_500)
+        .appendJsonl(buildUserToolResultRecord('toolu-b8-off-agent'))
+        .at(4_900)
+        .appendJsonl(buildTurnDurationRecord())
+        .holdOpenFor(8_000)
+        .build(),
+    });
+
+    // External scanner runs on a 3s interval, so external adoption is bounded by
+    // ~3s for the JSONL to be picked up + JSONL polling time for the tool_use line.
+    // Bumped timeouts cover scanner phase + polling round under load (first scan
+    // can be skipped if the test setup races the scanner's first tick).
+    await expectOverlayVisible(frame, 'Subtask: Background basic subtask', 20_000);
+    await expectOverlayCount(frame, 1, 10_000);
+    await expectNoOverlay(frame, 'general-purpose', 2_000);
+
+    // Stability check: ensure no late-fire misroutes the subagent as a teammate.
+    await frame.waitForTimeout(5_000);
+    await expectOverlayCount(frame, 1);
+    await expectNoOverlay(frame, 'general-purpose', 2_000);
+  });
+
+  test('C4 agentToolsClear at turn end', async ({ pixelAgents }) => {
+    const { frame, window, tmpHome, mockLogFile } = pixelAgents;
+
+    await setSettings(frame, {
+      watchAllSessions: false,
+      hooksEnabled: false,
+      alwaysShowLabels: true,
+      debugView: false,
+    });
+
+    // Cross-cutting invariant from the manual F5 matrix: when a turn ends
+    // (turn_duration record), all active tool overlays must clear back to "Idle".
+    // The test runs in hooks-off so it exercises the JSONL parser path; a regression
+    // here would leave a ghost "Running: ..." overlay even after the turn ended.
+    await arrangeNextClaudeInvocation(
+      tmpHome,
+      claudeScenario('C4 turn-end clear')
+        .at(1_000)
+        .appendJsonl(buildAssistantToolUseRecord('toolu-c4-bash', 'Bash', { command: 'npm test' }))
+        .at(3_000)
+        .appendJsonl(buildUserToolResultRecord('toolu-c4-bash'))
+        .at(3_500)
+        .appendJsonl(buildTurnDurationRecord())
+        .holdOpenFor(8_000)
+        .build(),
+    );
+
+    await spawnInternalAgentAndWait(frame, tmpHome, mockLogFile);
+    await openPixelAgentsPanel(window);
+    const panelFrame = await getPixelAgentsFrame(window);
+
+    // First the active overlay should show the bash command.
+    await expectOverlayVisible(panelFrame, 'Running: npm test', 8_000);
+
+    // After tool_result + turn_duration, the overlay must revert to "Idle".
+    await expectOverlayVisible(panelFrame, 'Idle', 8_000);
+    await expectNoOverlay(panelFrame, 'Running: npm test', 2_000);
+  });
+
+  // C7: verify timers are cancelled when an agent is closed via the overlay X.
+  //
+  // Invariant: closing an agent must cancel its in-flight 7s permission and 5s
+  // text-idle heuristic timers. If a timer fires after close and the extension
+  // unconditionally broadcasts `agentToolPermission` (or `agentStatus: waiting`)
+  // for the gone agent, the webview's handler runs playPermissionSound() /
+  // playDoneSound() (see webview-ui/src/hooks/useExtensionMessages.ts:354 and 341),
+  // which our notificationSound.ts instrumentation records in
+  // window.__pixelAgentsSoundsPlayed.
+  //
+  // Uses EXTERNAL agent (no VS Code terminal) so the Pixel Agents panel stays at
+  // full size, dodging the layout race that breaks closeAgentFromOverlay after
+  // an internal spawn. Mirrors the working B12 close-via-overlay pattern.
+  //
+  // This catches "hard" leaks (broadcast despite missing agent). "Soft" leaks
+  // (timer fires but its callback no-ops because internal state is gone) are
+  // invisible from the webview — they require extension-host instrumentation
+  // and are out of scope here.
+  test('C7 timers cancelled when agent closed via overlay (hooks off)', async ({ pixelAgents }) => {
+    const { frame, tmpHome, workspaceDir, mockLogFile } = pixelAgents;
+
+    await setSettings(frame, {
+      watchAllSessions: true,
+      hooksEnabled: false,
+      alwaysShowLabels: true,
+      debugView: false,
+    });
+
+    await spawnExternalClaudeScenario({
+      tmpHome,
+      workspaceDir,
+      mockLogFile,
+      sessionId: 'c7-timer-leak',
+      scenario: claudeScenario('C7 timer leak after close hooks off')
+        .at(2_500)
+        .appendJsonl(
+          buildAssistantToolUseRecord('toolu-c7', 'Bash', {
+            command: 'npm test',
+          }),
+        )
+        .holdOpenFor(20_000)
+        .build(),
+    });
+
+    await expectOverlayCount(frame, 1, 12_000);
+    await expectOverlayVisible(frame, 'Running: npm test');
+    const [agentId] = await readAgentOverlayIds(frame);
+
+    await closeAgentFromOverlay(frame, { agentId });
+    await expectOverlayCount(frame, 0, 8_000);
+
+    // Reset AFTER close so only post-close sounds count as leaks.
+    await frame.evaluate(() => {
+      const w = window as Window & {
+        __pixelAgentsTestHooks?: { playedSounds?: unknown[] };
+      };
+      if (w.__pixelAgentsTestHooks) w.__pixelAgentsTestHooks.playedSounds = [];
+    });
+
+    // Wait longer than the 7s permission timer + cushion. If a timer leaked,
+    // the broadcast lands during this window.
+    await frame.waitForTimeout(9_000);
+
+    await expectOverlayCount(frame, 0);
+    const playedKinds = await frame.evaluate(() => {
+      const w = window as Window & {
+        __pixelAgentsTestHooks?: { playedSounds?: Array<{ kind: string }> };
+      };
+      return (w.__pixelAgentsTestHooks?.playedSounds ?? []).map((s) => s.kind);
+    });
+    expect(playedKinds).not.toContain('permission');
+    expect(playedKinds).not.toContain('done');
   });
 });

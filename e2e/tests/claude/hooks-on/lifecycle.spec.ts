@@ -1,8 +1,12 @@
+import path from 'path';
+
 import { expect, test } from '../../../fixtures/pixel-agents';
 import {
+  idlePrompt,
   notificationPermissionPrompt,
   preToolUseAgent,
   preToolUseBash,
+  sendHookEvent,
   sessionEndClear,
   sessionEndExit,
   sessionEndResume,
@@ -12,6 +16,7 @@ import {
   subagentStart,
   taskCompleted,
   teammateIdle,
+  waitForHookServer,
 } from '../../../helpers/hooks';
 import { spawnInternalAgentAndWait } from '../../../helpers/internal-agent';
 import {
@@ -47,9 +52,15 @@ import {
   buildTurnDurationRecord,
   buildUserToolResultBatchRecord,
   buildUserToolResultRecord,
+  getClaudeProjectDir,
   seedTeamConfig,
 } from '../../../helpers/team';
-import { getPixelAgentsFrame, openPixelAgentsPanel, setSettings } from '../../../helpers/webview';
+import {
+  closeBottomPanel,
+  getPixelAgentsFrame,
+  openPixelAgentsPanel,
+  setSettings,
+} from '../../../helpers/webview';
 
 const PARALLEL_PARENT_TOOL_ID = 'toolu-b5-parent';
 const SECOND_TEAMMATE_ALIAS = 'reviewer';
@@ -169,11 +180,15 @@ test.describe('Hooks ON / Lifecycle', () => {
     await expectOverlayCount(panelFrame, 1);
     expect(await readAgentOverlayIds(panelFrame)).toEqual([originalAgentId]);
 
+    // Settling wait: give the runtime a chance to wrongly attach the stale tool
+    // to the resumed agent before asserting absence.
     await panelFrame.waitForTimeout(500);
     await expectNoOverlay(panelFrame, 'Running: npm run stale');
 
-    await panelFrame.waitForTimeout(2_500);
-    await expectOverlayVisible(panelFrame, 'Running: npm test');
+    // Wait past the 2s resume grace window for the new tool to take effect.
+    // expectOverlayVisible polls until the assertion holds; bumping the timeout
+    // covers grace expiry + post-grace tool propagation.
+    await expectOverlayVisible(panelFrame, 'Running: npm test', 5_000);
     await expectOverlayCount(panelFrame, 1);
     expect(await readAgentOverlayIds(panelFrame)).toEqual([originalAgentId]);
   });
@@ -446,6 +461,8 @@ test.describe('Hooks ON / Lifecycle', () => {
     await expectOverlayCount(panelFrame, 1, 12_000);
     await expectNoOverlayWithTexts(panelFrame, [INLINE_TEAMMATE_ROLE], 2_000);
 
+    // Stability check: after cascade removal, the teammate must not reappear
+    // (zombie cleanup race). Polling alone cannot test this; we have to wait.
     await panelFrame.waitForTimeout(8_000);
     await expectOverlayCount(panelFrame, 1);
     await expectNoOverlayWithTexts(panelFrame, [INLINE_TEAMMATE_ROLE], 2_000);
@@ -580,6 +597,8 @@ test.describe('Hooks ON / Lifecycle', () => {
     await expectOverlayVisible(frame, 'Subtask: Background basic subtask');
     await expectOverlayCount(frame, 1, 10_000);
     await expectNoOverlay(frame, 'general-purpose', 2_000);
+    // Stability check: a misrouted SubagentStart could spawn a teammate-style
+    // overlay seconds later (the lead has no teamName, so this is the regression).
     await frame.waitForTimeout(5_000);
     await expectOverlayCount(frame, 1);
   });
@@ -850,8 +869,173 @@ test.describe('Hooks ON / Lifecycle', () => {
     const [newAgentId] = await readAgentOverlayIds(frame);
     expect(newAgentId).not.toBe(oldAgentId);
 
+    // Stability check: the closed JSONL must NOT be re-adopted during the 3-min
+    // cooldown. 4s is enough to cover several scanner ticks.
     await frame.waitForTimeout(4_000);
     await expectNoOverlay(frame, 'Running: npm run old-stale', 2_000);
     await expectOverlayCount(frame, 1);
+  });
+
+  // C8: verify playDoneSound() fires on agentStatus: 'waiting'.
+  // The webview's notificationSound.ts records every invocation into
+  // window.__pixelAgentsSoundsPlayed (a test-only marker that runs BEFORE the
+  // soundEnabled gate). We trigger waiting state by sending an idle_prompt
+  // notification hook (the same path A7 uses to surface "Might be waiting for
+  // input") and assert the sound was dispatched.
+  test('C8 sound chime fires on agentStatus waiting', async ({ pixelAgents }) => {
+    const { frame, tmpHome, workspaceDir, mockLogFile } = pixelAgents;
+
+    await setSettings(frame, {
+      watchAllSessions: true,
+      hooksEnabled: true,
+      alwaysShowLabels: true,
+      debugView: false,
+    });
+
+    await waitForClaudeHookSetup(tmpHome);
+    const serverConfig = await waitForHookServer(tmpHome);
+    const sessionId = 'c8-sound-chime-session';
+
+    await spawnExternalClaudeScenario({
+      tmpHome,
+      workspaceDir,
+      mockLogFile,
+      scenario: claudeScenario('C8 sound chime smoke').holdOpenFor(3_000).build(),
+      sessionId,
+    });
+
+    const projectDir = getClaudeProjectDir(tmpHome, workspaceDir);
+    const transcriptPath = path.join(projectDir, `${sessionId}.jsonl`);
+
+    // SessionStart registers the session with the hook server so that the next
+    // event (PreToolUseBash) drives the agent visible rather than landing in the
+    // pre-registration buffer (same pattern as A7).
+    await sendHookEvent(serverConfig, sessionStartStartup(sessionId, workspaceDir, transcriptPath));
+
+    // Drive the agent active first (so the waiting transition is a real state
+    // change rather than a no-op on a never-active agent).
+    await sendHookEvent(serverConfig, preToolUseBash(sessionId, 'npm test'));
+    await expectOverlayCount(frame, 1);
+    await expectOverlayVisible(frame, 'Running: npm test');
+
+    // Reset the marker AFTER active-state dispatch so we only capture sounds
+    // triggered by the idle_prompt under test.
+    await frame.evaluate(() => {
+      const w = window as Window & {
+        __pixelAgentsTestHooks?: { playedSounds?: unknown[] };
+      };
+      if (w.__pixelAgentsTestHooks) w.__pixelAgentsTestHooks.playedSounds = [];
+    });
+
+    await sendHookEvent(serverConfig, idlePrompt(sessionId));
+    await expectOverlayVisible(frame, 'Might be waiting for input');
+
+    await expect
+      .poll(
+        async () =>
+          frame.evaluate(() => {
+            const w = window as Window & {
+              __pixelAgentsTestHooks?: { playedSounds?: Array<{ kind: string }> };
+            };
+            return (w.__pixelAgentsTestHooks?.playedSounds ?? []).map((s) => s.kind);
+          }),
+        { timeout: 5_000 },
+      )
+      .toContain('done');
+  });
+
+  // C9: verify restored agents skip the matrix-rain spawn animation.
+  //
+  // Invariant: useExtensionMessages.ts:153 passes skipSpawnEffect=true when
+  // creating characters from the existingAgents payload. If someone drops
+  // that arg, restored agents would briefly show matrixEffect='spawn' for
+  // ~300ms (the matrix rain animation), regressing the "instant restore" UX.
+  //
+  // Trigger: close the bottom panel, then reopen it. closeBottomPanel hides
+  // the WebviewView; PixelAgentsViewProvider does not set
+  // retainContextWhenHidden so VS Code disposes the webview. Reopening via
+  // openPixelAgentsPanel re-runs resolveWebviewView, bootstraps a fresh
+  // React app, sends webviewReady, and the extension's view provider
+  // unconditionally calls sendExistingAgents on every webviewReady
+  // (PixelAgentsViewProvider.ts:479).
+  //
+  // window.location.reload() does NOT work here: vscode-webview:// iframes
+  // can't survive a content-level reload (the security token / CSP / API
+  // binding break) — the panel renders broken text instead of the canvas.
+  //
+  // Observable: window.__pixelAgentsTestHooks.getCharacters() (exposed from
+  // App.tsx) returns a snapshot of character.matrixEffect. Sample for 400ms
+  // starting at first character observation post-restore. A broken impl
+  // (skipSpawnEffect=false) would show 'spawn' in at least one early sample
+  // because the matrix effect lives ~300ms before transitioning to null.
+  test('C9 restored agents skip spawn effect (no matrix animation)', async ({ pixelAgents }) => {
+    const { window, tmpHome, mockLogFile } = pixelAgents;
+    let frame = pixelAgents.frame;
+
+    await setSettings(frame, {
+      watchAllSessions: false,
+      hooksEnabled: true,
+      alwaysShowLabels: true,
+      debugView: false,
+    });
+
+    await waitForClaudeHookSetup(tmpHome);
+    await arrangeNextClaudeInvocation(
+      tmpHome,
+      claudeScenario('C9 restored agents skip spawn effect').holdOpenFor(20_000).build(),
+    );
+    await spawnInternalAgentAndWait(frame, tmpHome, mockLogFile);
+
+    await openPixelAgentsPanel(window);
+    frame = await getPixelAgentsFrame(window);
+    await expectOverlayCount(frame, 1);
+
+    // Let the original spawn animation finish so we don't confuse it with
+    // the post-restore observation (matrix effect lives ~300ms; 800ms cushion).
+    await frame.waitForTimeout(800);
+
+    await closeBottomPanel(window);
+    await openPixelAgentsPanel(window);
+    frame = await getPixelAgentsFrame(window);
+
+    // The fresh webview has an empty addAgentLog. Wait until restoreAgents has
+    // run (existingAgents → layoutLoaded → addAgent), then read the log. The
+    // log captures matrixEffect AT addAgent time (synchronous inside the
+    // wrapper), so it's immune to the ~300ms matrix-effect lifetime race that
+    // would let a regression slip past a snapshot-based observable.
+    await expect
+      .poll(
+        async () =>
+          frame.evaluate(() => {
+            const w = window as Window & {
+              __pixelAgentsTestHooks?: { addAgentLog?: unknown[] };
+            };
+            return w.__pixelAgentsTestHooks?.addAgentLog?.length ?? 0;
+          }),
+        { timeout: 15_000 },
+      )
+      .toBeGreaterThan(0);
+
+    const log = await frame.evaluate(() => {
+      const w = window as Window & {
+        __pixelAgentsTestHooks?: {
+          addAgentLog?: Array<{
+            id: number;
+            skipSpawnEffect: boolean | undefined;
+            matrixEffectAtCreation: string | null;
+          }>;
+        };
+      };
+      return w.__pixelAgentsTestHooks?.addAgentLog ?? [];
+    });
+
+    // Every addAgent call in this fresh webview comes from the restore path
+    // (there's no agentCreated message between webview boot and our read).
+    // Each must have skipSpawnEffect=true and matrixEffect=null at creation.
+    expect(log.length).toBeGreaterThan(0);
+    for (const entry of log) {
+      expect(entry.skipSpawnEffect).toBe(true);
+      expect(entry.matrixEffectAtCreation).toBeNull();
+    }
   });
 });
