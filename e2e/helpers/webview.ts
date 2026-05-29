@@ -15,29 +15,56 @@ export interface WebviewSettings {
 async function runCommand(window: Page, command: string): Promise<void> {
   // Retry the full command palette interaction up to 3 times.
   // macOS CI can swallow keypresses or fail to populate results.
-  for (let attempt = 0; attempt < 3; attempt++) {
+  //
+  // Why keyboard automation instead of a direct API call: VS Code's
+  // `vscode.commands.executeCommand` lives in the renderer's workbench,
+  // not on globalThis, and is not exposed to Playwright's window.evaluate.
+  // Electron's app.evaluate only reaches the main process. So we drive the
+  // quick-pick via key events and accept the retry cost on flaky CI.
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 3; attempt++) {
     // Dismiss any previous quick-input state
     await window.keyboard.press('Escape');
     await window.waitForTimeout(300);
 
+    let phase = 'open';
     try {
+      phase = 'open';
       await window.keyboard.press('F1');
       await window.waitForSelector('.quick-input-widget .quick-input-filter input', {
         state: 'visible',
         timeout: 5_000,
       });
+      phase = 'type';
       await window.keyboard.type(command);
       // Wait for a list row matching the typed command (not stale results)
+      phase = 'list';
       await window.waitForSelector(`.quick-input-list .monaco-list-row[aria-label*="${command}"]`, {
         timeout: 5_000,
       });
+      // Success: log a flake warning when we needed more than one attempt so CI
+      // surfaces the timing problem before it turns into a hard failure.
+      if (attempt > 1) {
+        console.warn(`[e2e] runCommand("${command}") succeeded on attempt ${attempt}`);
+      }
+      lastError = undefined;
       break;
-    } catch {
-      if (attempt === 2) {
-        throw new Error(`Command palette failed after 3 attempts for "${command}"`);
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(
+        `[e2e] runCommand("${command}") attempt ${attempt} failed at phase=${phase}: ${message}`,
+      );
+      if (attempt === 3) {
+        throw new Error(
+          `Command palette failed after 3 attempts for "${command}" (last phase=${phase}): ${message}`,
+        );
       }
     }
   }
+  // Guard against TypeScript flow-narrowing forgetting the loop exit path.
+  if (lastError) throw lastError;
+
   await window.keyboard.press('Enter');
   await window
     .waitForSelector('.quick-input-widget', {
@@ -79,6 +106,23 @@ async function ensurePanelIsLarge(window: Page): Promise<void> {
  * Open the Pixel Agents panel via the Command Palette and wait for the
  * "Pixel Agents: Show Panel" command to execute.
  */
+/**
+ * Close the bottom panel. Triggers onDidChangeVisibility(false) on every
+ * WebviewView hosted there; since PixelAgentsViewProvider does NOT set
+ * retainContextWhenHidden, the webview is disposed and resolveWebviewView
+ * is called fresh when the panel reopens. Used by the C9 test to exercise
+ * the existingAgents restore path without a destructive iframe reload.
+ *
+ * Toggle (rather than Close) is used because the literal command name varies
+ * by VS Code locale/version; "View: Toggle Panel" is stable. Caller must
+ * ensure the panel is currently open before calling (it will be after a
+ * preceding openPixelAgentsPanel + spawn flow).
+ */
+export async function closeBottomPanel(window: Page): Promise<void> {
+  await runCommand(window, 'View: Toggle Panel');
+  await window.waitForTimeout(800);
+}
+
 export async function openPixelAgentsPanel(window: Page): Promise<void> {
   await runCommand(window, 'Pixel Agents: Show Panel');
 
@@ -103,26 +147,35 @@ export async function openPixelAgentsPanel(window: Page): Promise<void> {
  * returning it.
  */
 export async function getPixelAgentsFrame(window: Page): Promise<Frame> {
-  const deadline = Date.now() + WEBVIEW_TIMEOUT_MS;
+  let foundFrame: Frame | null = null;
 
-  while (Date.now() < deadline) {
-    for (const frame of window.frames()) {
-      const url = frame.url();
-      if (!url.startsWith('vscode-webview://')) continue;
+  await expect
+    .poll(
+      async () => {
+        for (const frame of window.frames()) {
+          if (!frame.url().startsWith('vscode-webview://')) continue;
+          // count() resolves immediately (no waiting); a non-zero count means
+          // this is the Pixel Agents frame.
+          const buttonCount = await frame.locator('button', { hasText: '+ Agent' }).count();
+          if (buttonCount > 0) {
+            foundFrame = frame;
+            return true;
+          }
+        }
+        return false;
+      },
+      {
+        message: 'Pixel Agents webview frame with "+ Agent" button not found',
+        timeout: WEBVIEW_TIMEOUT_MS,
+        intervals: [250, 500, 1000],
+      },
+    )
+    .toBe(true);
 
-      try {
-        const btn = await frame.waitForSelector('button:has-text("+ Agent")', { timeout: 2_000 });
-        if (btn) return frame;
-      } catch {
-        // not this frame, keep looking
-      }
-    }
-
-    // Wait for a new frame to be attached
-    await window.waitForTimeout(500);
+  if (!foundFrame) {
+    throw new Error('Internal error: poll succeeded but foundFrame is null');
   }
-
-  throw new Error('Timed out waiting for Pixel Agents webview frame with "+ Agent" button');
+  return foundFrame;
 }
 
 /**

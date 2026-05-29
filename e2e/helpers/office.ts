@@ -3,6 +3,27 @@ import { expect } from '@playwright/test';
 
 const OVERLAY_TIMEOUT_MS = 15_000;
 
+/**
+ * Wait-strategy conventions for tests using this helper module:
+ *
+ * 1. **Positive assertion** ("X should appear"): use `expectOverlayVisible`,
+ *    `expectOverlayCount(N>0)`, or `expectOverlayVisibleWithTexts`. These poll
+ *    until the assertion succeeds or the timeout expires — no explicit
+ *    `waitForTimeout` is needed before them.
+ *
+ * 2. **Negative assertion** ("X should NOT appear"): use `expectNoOverlay` /
+ *    `expectNoOverlayWithTexts` with the desired timeout. A brief
+ *    `waitForTimeout` before is a settling wait (give the runtime a chance to
+ *    do the wrong thing before checking absence). Keep these short (<1s).
+ *
+ * 3. **Stability check** ("state remains correct N seconds later"): use
+ *    `waitForTimeout(N)` followed by a re-assertion. This pattern guards
+ *    against bugs where a state transition is correct momentarily then
+ *    regresses (e.g. cleanup race vs. zombie re-spawn). Polling cannot
+ *    replace stability checks because `expect.poll` returns at the first
+ *    match, not after the state holds for N seconds.
+ */
+
 export function getAgentOverlays(frame: Frame): Locator {
   return frame.locator('[data-testid="agent-overlay"]');
 }

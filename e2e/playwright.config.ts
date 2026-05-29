@@ -31,11 +31,10 @@ export default defineConfig({
     ],
   ],
   outputDir: artifactsDir,
-  // NOTE: These settings are no-ops for Electron tests launched via electron.launch().
-  // Playwright's built-in artifact handling only applies to browser contexts.
-  // Video is configured in launch.ts (recordVideo option) and screenshots are
-  // handled manually in the test's afterEach/finally blocks.
-  use: {},
+  // NOTE: No `use` defaults — all browser-context settings are no-ops because
+  // tests launch Electron directly via electron.launch(). Video is configured
+  // in e2e/helpers/launch.ts (recordVideo option) and screenshots are taken
+  // manually in the fixture teardown (e2e/fixtures/pixel-agents.ts).
   // Default to one worker locally; CI can override this with --workers.
   workers: 1,
   // Retry once for tests that are sensitive to ordering / load (timing-driven

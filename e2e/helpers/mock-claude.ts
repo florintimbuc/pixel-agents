@@ -294,6 +294,26 @@ export interface ExternalClaudeSpawn {
   sessionId: string;
 }
 
+/** Module-level registry of external mock-claude processes so fixture teardown
+ *  can kill any that the test forgot to clean up. Suite runs with workers: 1,
+ *  so cross-test contamination is impossible. */
+const trackedExternalProcesses = new Set<ChildProcess>();
+
+/** Kill any mock-claude processes spawned via spawnExternalClaudeScenario
+ *  that are still alive. Called from the test fixture's teardown. */
+export async function killTrackedExternalProcesses(): Promise<void> {
+  for (const child of trackedExternalProcesses) {
+    if (child.exitCode === null && child.signalCode === null) {
+      try {
+        child.kill('SIGTERM');
+      } catch {
+        // Process may already be gone; ignore.
+      }
+    }
+  }
+  trackedExternalProcesses.clear();
+}
+
 export async function spawnExternalClaudeScenario(options: {
   tmpHome: string;
   workspaceDir: string;
@@ -311,15 +331,48 @@ export async function spawnExternalClaudeScenario(options: {
     PIXEL_AGENTS_NODE_BIN: process.execPath,
   };
 
+  // Pipe stderr so we can surface diagnostics on timeout; stdout stays ignored.
   const child = spawn(claudeBinary, ['--session-id', options.sessionId], {
     cwd: options.workspaceDir,
     env,
     shell: process.platform === 'win32',
-    stdio: 'ignore',
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+
+  // Track this child so fixture teardown can SIGTERM it if the test forgot to.
+  trackedExternalProcesses.add(child);
+  child.on('exit', () => trackedExternalProcesses.delete(child));
+
+  // Capture stderr + early exit so timeouts can blame the actual cause. Use a
+  // ref object so TypeScript narrows correctly through the async event-loop boundary
+  // (TS doesn't track let-bindings mutated in callbacks the same way it tracks
+  // property writes; the closure-narrowing limitation collapses spawnError to never).
+  const watch: {
+    stderrChunks: Buffer[];
+    spawnError: Error | null;
+    earlyExit: { code: number | null; signal: NodeJS.Signals | null } | null;
+  } = {
+    stderrChunks: [],
+    spawnError: null,
+    earlyExit: null,
+  };
+  child.stderr?.on('data', (chunk: Buffer) => watch.stderrChunks.push(chunk));
+  child.on('error', (err) => {
+    watch.spawnError = err;
+  });
+  child.on('exit', (code, signal) => {
+    if (code !== 0 || signal !== null) {
+      watch.earlyExit = { code, signal };
+    }
   });
 
   const deadline = Date.now() + INVOCATION_TIMEOUT_MS;
   while (Date.now() < deadline) {
+    if (watch.spawnError) {
+      throw new Error(
+        `External mock Claude session ${options.sessionId} failed to spawn: ${watch.spawnError.message}`,
+      );
+    }
     const invocationLog = readTextIfExists(options.mockLogFile);
     if (invocationLog.includes(`session-id=${options.sessionId}`)) {
       return {
@@ -327,8 +380,20 @@ export async function spawnExternalClaudeScenario(options: {
         sessionId: options.sessionId,
       };
     }
+    if (watch.earlyExit) {
+      const stderrText = Buffer.concat(watch.stderrChunks).toString('utf8').trim();
+      throw new Error(
+        `External mock Claude session ${options.sessionId} exited early ` +
+          `(code=${watch.earlyExit.code}, signal=${watch.earlyExit.signal}) before logging an invocation. ` +
+          `stderr: ${stderrText || '<empty>'}`,
+      );
+    }
     await sleep(250);
   }
 
-  throw new Error(`Timed out waiting for external mock Claude session ${options.sessionId}`);
+  const stderrText = Buffer.concat(watch.stderrChunks).toString('utf8').trim();
+  throw new Error(
+    `Timed out waiting for external mock Claude session ${options.sessionId}. ` +
+      `stderr so far: ${stderrText || '<empty>'}`,
+  );
 }
