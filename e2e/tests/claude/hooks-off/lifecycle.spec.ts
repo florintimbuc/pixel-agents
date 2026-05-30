@@ -689,4 +689,82 @@ test.describe('Hooks OFF / Lifecycle', () => {
     expect(playedKinds).not.toContain('permission');
     expect(playedKinds).not.toContain('done');
   });
+
+  // C14: sub-agent permission bubble fires when a sub-agent runs a non-exempt
+  // tool with no follow-up data for ~5s. The heuristic permission timer is
+  // active for sub-agents in hooks-OFF mode (same path as parent agents).
+  //
+  // Trigger sequence:
+  // 1. Parent agent does Task tool_use -> sub-character appears.
+  // 2. A progress record arrives with a sub-agent tool_use for a non-exempt
+  //    tool (Bash). transcriptParser registers the sub-tool and starts the
+  //    permission timer.
+  // 3. ~5s with no further sub-agent data -> permission bubble appears on
+  //    both parent and sub-character (per CLAUDE.md "Sub-agent permission
+  //    detection" note).
+  test('C14 sub-agent permission bubble fires on stalled non-exempt sub-tool', async ({
+    pixelAgents,
+  }) => {
+    const { frame, window, tmpHome, mockLogFile } = pixelAgents;
+
+    await setSettings(frame, {
+      watchAllSessions: false,
+      hooksEnabled: false,
+      alwaysShowLabels: true,
+      debugView: false,
+    });
+
+    const parentToolId = 'toolu-c14-task';
+    const subToolId = 'toolu-c14-bash-sub';
+
+    await arrangeNextClaudeInvocation(
+      tmpHome,
+      claudeScenario('C14 sub-agent permission bubble hooks off')
+        .at(2_000)
+        .appendJsonl(
+          buildAssistantToolUseRecord(parentToolId, 'Task', {
+            description: 'C14 subtask',
+          }),
+        )
+        .at(3_000)
+        .appendJsonl({
+          type: 'progress',
+          parentToolUseID: parentToolId,
+          data: {
+            type: 'agent_progress',
+            message: {
+              type: 'assistant',
+              message: {
+                content: [
+                  {
+                    type: 'tool_use',
+                    id: subToolId,
+                    name: 'Bash',
+                    input: { command: 'npm test' },
+                  },
+                ],
+              },
+            },
+          },
+        })
+        // Hold open WAY past the 5s heuristic permission timer so the bubble
+        // has time to appear before mock-claude exits and the terminal closes.
+        .holdOpenFor(15_000)
+        .build(),
+    );
+
+    const spawned = await spawnInternalAgentAndWait(frame, tmpHome, mockLogFile);
+    expect(spawned.sessionId).toBeTruthy();
+    await openPixelAgentsPanel(window);
+    const panelFrame = await getPixelAgentsFrame(window);
+
+    // Sub-character appears once the Task tool_use is parsed.
+    await expectOverlayCount(panelFrame, 2, 12_000);
+    await expectOverlayVisible(panelFrame, 'Subtask: C14 subtask');
+
+    // Within ~7s (5s heuristic timer + cushion) the permission bubble must
+    // appear. The bubble manifests as the "Needs approval" overlay text on
+    // at least one of the two characters.
+    await expectOverlayVisible(panelFrame, 'Needs approval', 8_000);
+  });
 });

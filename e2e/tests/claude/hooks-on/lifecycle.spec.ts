@@ -1,9 +1,11 @@
+import fs from 'fs';
 import path from 'path';
 
 import { expect, test } from '../../../fixtures/pixel-agents';
 import {
   idlePrompt,
   notificationPermissionPrompt,
+  permissionRequest,
   preToolUseAgent,
   preToolUseBash,
   sendHookEvent,
@@ -58,6 +60,7 @@ import {
 import {
   closeBottomPanel,
   getPixelAgentsFrame,
+  getSettingChecked,
   openPixelAgentsPanel,
   setSettings,
 } from '../../../helpers/webview';
@@ -1037,5 +1040,462 @@ test.describe('Hooks ON / Lifecycle', () => {
       expect(entry.skipSpawnEffect).toBe(true);
       expect(entry.matrixEffectAtCreation).toBeNull();
     }
+  });
+
+  // C5: verify formatToolStatus produces the right overlay text for every
+  // PreToolUse'd tool, not just Bash. Every other e2e test fires Bash and
+  // asserts "Running: npm test"; the 9 other tool-name branches in
+  // claudeProvider.formatToolStatus had zero direct coverage prior to this.
+  //
+  // Each entry below maps a hook payload (tool_name + tool_input) to the
+  // expected overlay text. If formatToolStatus regresses, this test catches
+  // it. The agent stays the same throughout; each PreToolUse swaps the
+  // active tool text, and PostToolUse clears it before the next.
+  test('C5 tool status text matches every PreToolUse tool', async ({ pixelAgents }) => {
+    const { frame, tmpHome, workspaceDir, mockLogFile } = pixelAgents;
+
+    await setSettings(frame, {
+      watchAllSessions: true,
+      hooksEnabled: true,
+      alwaysShowLabels: true,
+      debugView: false,
+    });
+
+    await waitForClaudeHookSetup(tmpHome);
+    const serverConfig = await waitForHookServer(tmpHome);
+    const sessionId = 'c5-tool-status';
+
+    await spawnExternalClaudeScenario({
+      tmpHome,
+      workspaceDir,
+      mockLogFile,
+      scenario: claudeScenario('C5 tool status text matrix').holdOpenFor(8_000).build(),
+      sessionId,
+    });
+
+    const projectDir = getClaudeProjectDir(tmpHome, workspaceDir);
+    const transcriptPath = path.join(projectDir, `${sessionId}.jsonl`);
+    await sendHookEvent(serverConfig, sessionStartStartup(sessionId, workspaceDir, transcriptPath));
+
+    // Drive the agent visible with a Bash tool first so the overlay exists.
+    await sendHookEvent(serverConfig, preToolUseBash(sessionId, 'npm test'));
+    await expectOverlayCount(frame, 1);
+    await expectOverlayVisible(frame, 'Running: npm test');
+
+    // Task / Agent tools follow the sub-character code path (covered by A1)
+    // and don't change the parent overlay text — they're excluded here.
+    // WebSearch returns "Searching the web" but is covered implicitly by
+    // the same code branch as Glob/Grep; one Search variant is enough.
+    type ToolCase = { toolName: string; toolInput: Record<string, unknown>; expectedText: string };
+    const cases: ToolCase[] = [
+      { toolName: 'Read', toolInput: { file_path: '/x/foo.ts' }, expectedText: 'Reading foo.ts' },
+      { toolName: 'Edit', toolInput: { file_path: '/x/bar.ts' }, expectedText: 'Editing bar.ts' },
+      { toolName: 'Write', toolInput: { file_path: '/x/baz.ts' }, expectedText: 'Writing baz.ts' },
+      { toolName: 'Glob', toolInput: { pattern: '**/*.ts' }, expectedText: 'Searching files' },
+      { toolName: 'Grep', toolInput: { pattern: 'foo' }, expectedText: 'Searching code' },
+      {
+        toolName: 'WebFetch',
+        toolInput: { url: 'https://x' },
+        expectedText: 'Fetching web content',
+      },
+    ];
+
+    for (const c of cases) {
+      // PostToolUse clears any prior tool's overlay; for the FIRST iteration this
+      // clears the seed Bash overlay above.
+      await sendHookEvent(serverConfig, {
+        session_id: sessionId,
+        hook_event_name: 'PostToolUse',
+      });
+      await sendHookEvent(serverConfig, {
+        session_id: sessionId,
+        hook_event_name: 'PreToolUse',
+        tool_name: c.toolName,
+        tool_input: c.toolInput,
+      });
+      await expectOverlayVisible(frame, c.expectedText);
+    }
+
+    await sendHookEvent(serverConfig, sessionEndExit(sessionId));
+    await expectOverlayCount(frame, 0);
+  });
+
+  // C10: verify playPermissionSound fires on agentToolPermission.
+  // Companion to C8 (which covers playDoneSound). The webview's permission
+  // path is webview-ui/src/hooks/useExtensionMessages.ts:354 — same
+  // playedSounds instrumentation as C8, just the other sound function.
+  test('C10 permission chime fires on agentToolPermission', async ({ pixelAgents }) => {
+    const { frame, tmpHome, workspaceDir, mockLogFile } = pixelAgents;
+
+    await setSettings(frame, {
+      watchAllSessions: true,
+      hooksEnabled: true,
+      alwaysShowLabels: true,
+      debugView: false,
+    });
+
+    await waitForClaudeHookSetup(tmpHome);
+    const serverConfig = await waitForHookServer(tmpHome);
+    const sessionId = 'c10-permission-chime';
+
+    await spawnExternalClaudeScenario({
+      tmpHome,
+      workspaceDir,
+      mockLogFile,
+      scenario: claudeScenario('C10 permission chime').holdOpenFor(3_000).build(),
+      sessionId,
+    });
+
+    const projectDir = getClaudeProjectDir(tmpHome, workspaceDir);
+    const transcriptPath = path.join(projectDir, `${sessionId}.jsonl`);
+    await sendHookEvent(serverConfig, sessionStartStartup(sessionId, workspaceDir, transcriptPath));
+    await sendHookEvent(serverConfig, preToolUseBash(sessionId, 'npm test'));
+    await expectOverlayCount(frame, 1);
+
+    // Reset the marker right before the action under test, so any earlier
+    // sounds (none expected from the spawn, but defensive) are ignored.
+    await frame.evaluate(() => {
+      const w = window as Window & {
+        __pixelAgentsTestHooks?: { playedSounds?: unknown[] };
+      };
+      if (w.__pixelAgentsTestHooks) w.__pixelAgentsTestHooks.playedSounds = [];
+    });
+
+    await sendHookEvent(serverConfig, permissionRequest(sessionId));
+    await expectOverlayVisible(frame, 'Needs approval');
+
+    await expect
+      .poll(
+        async () =>
+          frame.evaluate(() => {
+            const w = window as Window & {
+              __pixelAgentsTestHooks?: { playedSounds?: Array<{ kind: string }> };
+            };
+            return (w.__pixelAgentsTestHooks?.playedSounds ?? []).map((s) => s.kind);
+          }),
+        { timeout: 5_000 },
+      )
+      .toContain('permission');
+  });
+
+  // C11 group: claudeHookInstaller side effects on ~/.claude/settings.json.
+  //
+  // Background: when "Instant Detection (Hooks)" is toggled in Settings, the
+  // extension writes (install) or rewrites (uninstall) ~/.claude/settings.json
+  // via claudeHookInstaller. Historical bugs around clobbering pre-existing
+  // third-party hook entries make this a real bug surface. Unit tests cover the
+  // installer with mocked fs; this e2e covers the actual round-trip from
+  // setSettings UI toggle → file on disk.
+  //
+  // Pixel-agents hook entries are recognised by the command string containing
+  // 'claude-hook.js' (or legacy 'pixel-agents-hook.js'); see
+  // server/src/providers/hook/claude/claudeHookInstaller.ts::isOurHookEntry.
+
+  function readClaudeSettings(tmpHome: string): {
+    hooks?: Record<string, Array<{ matcher?: string; hooks: Array<{ command: string }> }>>;
+  } {
+    const p = path.join(tmpHome, '.claude', 'settings.json');
+    if (!fs.existsSync(p)) return {};
+    try {
+      return JSON.parse(fs.readFileSync(p, 'utf8'));
+    } catch {
+      return {};
+    }
+  }
+
+  function pixelAgentsHookPresent(
+    settings: ReturnType<typeof readClaudeSettings>,
+    eventName: string,
+  ): boolean {
+    const entries = settings.hooks?.[eventName] ?? [];
+    for (const entry of entries) {
+      for (const h of entry.hooks ?? []) {
+        if (h.command?.includes('claude-hook.js') || h.command?.includes('pixel-agents-hook.js')) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  function thirdPartyHookPresent(
+    settings: ReturnType<typeof readClaudeSettings>,
+    eventName: string,
+    marker: string,
+  ): boolean {
+    const entries = settings.hooks?.[eventName] ?? [];
+    for (const entry of entries) {
+      for (const h of entry.hooks ?? []) {
+        if (h.command?.includes(marker)) return true;
+      }
+    }
+    return false;
+  }
+
+  // C11a: the extension installs the pixel-agents hook on startup with the
+  // default hooksEnabled=true. Sanity check — if this fails, claudeHookInstaller
+  // never ran, and every other hooks-on test is operating against an empty
+  // settings.json (i.e., hooks are silently no-op'd).
+  test('C11a pixel-agents hook is installed on extension startup', async ({ pixelAgents }) => {
+    const { tmpHome } = pixelAgents;
+
+    await waitForClaudeHookSetup(tmpHome);
+    const settings = readClaudeSettings(tmpHome);
+
+    // installHooks writes entries for every hook event the provider supports.
+    // SessionStart and PreToolUse are the load-bearing ones; if those are present,
+    // installation succeeded.
+    expect(pixelAgentsHookPresent(settings, 'SessionStart')).toBe(true);
+    expect(pixelAgentsHookPresent(settings, 'PreToolUse')).toBe(true);
+  });
+
+  // C11b: toggling "Instant Detection" off uninstalls the pixel-agents hook;
+  // toggling it back on reinstalls. Round-trip is idempotent (no duplicate
+  // entries on the second install).
+  test('C11b hook install/uninstall round-trips via Settings toggle', async ({ pixelAgents }) => {
+    const { frame, tmpHome } = pixelAgents;
+
+    await waitForClaudeHookSetup(tmpHome);
+    expect(pixelAgentsHookPresent(readClaudeSettings(tmpHome), 'PreToolUse')).toBe(true);
+
+    // Uninstall: toggle hooks off.
+    await setSettings(frame, { hooksEnabled: false });
+    await expect
+      .poll(() => pixelAgentsHookPresent(readClaudeSettings(tmpHome), 'PreToolUse'), {
+        timeout: 5_000,
+      })
+      .toBe(false);
+
+    // Reinstall: toggle hooks back on.
+    await setSettings(frame, { hooksEnabled: true });
+    await expect
+      .poll(() => pixelAgentsHookPresent(readClaudeSettings(tmpHome), 'PreToolUse'), {
+        timeout: 5_000,
+      })
+      .toBe(true);
+
+    // No duplication: exactly one pixel-agents entry across all PreToolUse hooks.
+    const settings = readClaudeSettings(tmpHome);
+    const preTool = settings.hooks?.['PreToolUse'] ?? [];
+    const pixelAgentsCount = preTool.reduce((acc, entry) => {
+      return (
+        acc +
+        (entry.hooks ?? []).filter(
+          (h) =>
+            h.command?.includes('claude-hook.js') || h.command?.includes('pixel-agents-hook.js'),
+        ).length
+      );
+    }, 0);
+    expect(pixelAgentsCount).toBe(1);
+  });
+
+  // C12: permission bubble auto-clears when a fresh PreToolUse arrives.
+  //
+  // Implementation invariant: useExtensionMessages.ts:269 calls
+  // os.clearPermissionBubble(id) on every agentToolStart unless
+  // permissionActive=true is set on the new tool. Without this, the "Needs
+  // approval" overlay would linger across tool transitions inside the same
+  // session.
+  test('C12 permission bubble clears when a fresh tool starts', async ({ pixelAgents }) => {
+    const { frame, tmpHome, workspaceDir, mockLogFile } = pixelAgents;
+
+    await setSettings(frame, {
+      watchAllSessions: true,
+      hooksEnabled: true,
+      alwaysShowLabels: true,
+      debugView: false,
+    });
+
+    await waitForClaudeHookSetup(tmpHome);
+    const serverConfig = await waitForHookServer(tmpHome);
+    const sessionId = 'c12-permission-clear';
+
+    await spawnExternalClaudeScenario({
+      tmpHome,
+      workspaceDir,
+      mockLogFile,
+      scenario: claudeScenario('C12 permission bubble auto-clear').holdOpenFor(5_000).build(),
+      sessionId,
+    });
+
+    const projectDir = getClaudeProjectDir(tmpHome, workspaceDir);
+    const transcriptPath = path.join(projectDir, `${sessionId}.jsonl`);
+    await sendHookEvent(serverConfig, sessionStartStartup(sessionId, workspaceDir, transcriptPath));
+    await sendHookEvent(serverConfig, preToolUseBash(sessionId, 'npm test'));
+    await expectOverlayCount(frame, 1);
+    await expectOverlayVisible(frame, 'Running: npm test');
+
+    await sendHookEvent(serverConfig, permissionRequest(sessionId));
+    await expectOverlayVisible(frame, 'Needs approval');
+
+    // Fresh PreToolUse without permissionActive should clear the bubble and
+    // swap the overlay text to the new tool's status string.
+    await sendHookEvent(serverConfig, {
+      session_id: sessionId,
+      hook_event_name: 'PostToolUse',
+    });
+    await sendHookEvent(serverConfig, {
+      session_id: sessionId,
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Read',
+      tool_input: { file_path: '/x/foo.ts' },
+    });
+    await expectOverlayVisible(frame, 'Reading foo.ts');
+    await expectNoOverlay(frame, 'Needs approval', 2_000);
+  });
+
+  // C13: persisted settings survive a webview reload.
+  //
+  // The webview's settings UI is hydrated from `settingsLoaded` on every
+  // `webviewReady`. The extension reads from its persisted state (workspace
+  // and global state plus ~/.pixel-agents/config.json) and resends. A
+  // regression in any of {FileStateAdapter.setSetting, configPersistence,
+  // PixelAgentsViewProvider's webviewReady handler} would surface as "I
+  // turned X off, restarted, X is back on."
+  //
+  // Trigger: toggle Always Show Labels off, close+reopen the panel (forces a
+  // fresh webviewReady), open the Settings modal, read the indicator state.
+  // It must still be unchecked.
+  test('C13 Settings toggles persist across webview reload', async ({ pixelAgents }) => {
+    const { window } = pixelAgents;
+    let frame = pixelAgents.frame;
+
+    // Read whatever the fixture default is, then flip it. The persistence
+    // assertion is about the FLIPPED state surviving a reload, not about the
+    // initial default value.
+    const initial = await getSettingChecked(frame, 'Always Show Labels');
+    await setSettings(frame, { alwaysShowLabels: !initial });
+    expect(await getSettingChecked(frame, 'Always Show Labels')).toBe(!initial);
+
+    // Force a fresh webview by closing and reopening the panel (same
+    // mechanism C9 uses for the existingAgents restore path).
+    await closeBottomPanel(window);
+    await openPixelAgentsPanel(window);
+    frame = await getPixelAgentsFrame(window);
+
+    // After settingsLoaded re-hydrates, the toggle must still be in the
+    // flipped state — not back to the fixture default.
+    expect(await getSettingChecked(frame, 'Always Show Labels')).toBe(!initial);
+  });
+
+  // C15: layout editor smoke. Verifies entering edit mode reveals the editor
+  // toolbar, that a save round-trips through layoutPersistence.ts to
+  // ~/.pixel-agents/layout.json, and that exiting edit mode hides the toolbar.
+  //
+  // Strategy: click Layout button to enter edit mode -> assert a known
+  // editor-only button is visible -> click on the canvas to dirty the layout
+  // -> Save in EditActionBar -> read layout.json from disk and confirm it
+  // grew/changed from the initial state -> exit edit mode -> assert the
+  // editor button is gone.
+  //
+  // This deliberately doesn't assert any particular layout content beyond
+  // "the saved file contains a layout the editor session produced." Canvas
+  // pixel coordinates are not pinned because we only need ANY change to land
+  // on disk to prove the round trip works.
+  test('C15 layout editor smoke (enter, paint, save, persist, exit)', async ({ pixelAgents }) => {
+    const { frame, tmpHome } = pixelAgents;
+
+    const layoutPath = path.join(tmpHome, '.pixel-agents', 'layout.json');
+
+    // Initial layout — there should be one written at fixture startup since
+    // the webview boots with a default layout. Record its content for the
+    // post-save diff.
+    let initialLayout = '';
+    if (fs.existsSync(layoutPath)) {
+      initialLayout = fs.readFileSync(layoutPath, 'utf8');
+    }
+
+    // Dismiss any first-run tooltips that overlay the top toolbar. The
+    // "Instant Detection Active" tooltip and the "Updated to vN" tooltip
+    // both intercept clicks on the Undo/Redo/Save row. We dismiss them via
+    // their close buttons (the X) before entering edit mode.
+    for (const tooltipText of ['Instant Detection Active', 'Updated to v']) {
+      const tooltip = frame.locator('div', { hasText: tooltipText }).first();
+      if (await tooltip.isVisible().catch(() => false)) {
+        const closeBtn = tooltip.locator('button', { hasText: 'x' }).first();
+        if (await closeBtn.isVisible().catch(() => false)) {
+          await closeBtn.click().catch(() => {});
+        }
+      }
+    }
+
+    // Enter edit mode.
+    const layoutButton = frame.locator('button', { hasText: 'Layout' });
+    await expect(layoutButton).toBeVisible({ timeout: 15_000 });
+    await layoutButton.click();
+
+    // Editor toolbar should reveal at least one tool button. Paint floor is
+    // always present in the floor section of the toolbar.
+    const paintFloorBtn = frame.locator('button[title="Paint floor tiles"]');
+    await expect(paintFloorBtn).toBeVisible({ timeout: 10_000 });
+    await paintFloorBtn.click();
+
+    // Click the canvas center — with paint floor active, this paints the
+    // tile under the cursor and marks the layout dirty. The exact tile
+    // doesn't matter; ANY dirty edit produces a save-eligible layout.
+    const canvas = frame.locator('canvas').first();
+    const box = await canvas.boundingBox();
+    if (!box) throw new Error('Canvas has no bounding box');
+    await canvas.click({ position: { x: box.width / 2, y: box.height / 2 } });
+
+    // EditActionBar appears only when isDirty=true. Save button is part of it.
+    const saveBtn = frame.locator('button', { hasText: 'Save' });
+    await expect(saveBtn).toBeVisible({ timeout: 5_000 });
+    await saveBtn.click();
+
+    // Wait until layout.json reflects a change. The debounced save in
+    // layoutPersistence writes atomically; poll the file for any content
+    // delta from the initial snapshot.
+    await expect
+      .poll(
+        () => {
+          if (!fs.existsSync(layoutPath)) return false;
+          return fs.readFileSync(layoutPath, 'utf8') !== initialLayout;
+        },
+        { timeout: 10_000 },
+      )
+      .toBe(true);
+
+    // Exit edit mode and confirm the editor button disappears.
+    await layoutButton.click();
+    await expect(paintFloorBtn).toBeHidden({ timeout: 5_000 });
+  });
+
+  // C11c: the regression that historically bit users. A third-party hook
+  // entry pre-existing in settings.json must survive an uninstall of the
+  // pixel-agents hook untouched.
+  test('C11c uninstall preserves a pre-existing third-party hook', async ({ pixelAgents }) => {
+    const { frame, tmpHome } = pixelAgents;
+
+    await waitForClaudeHookSetup(tmpHome);
+    const settingsPath = path.join(tmpHome, '.claude', 'settings.json');
+
+    // Inject a third-party hook entry alongside our install.
+    const THIRD_PARTY_MARKER = '/usr/local/bin/third-party-hook.js';
+    const settings = readClaudeSettings(tmpHome);
+    if (!settings.hooks) settings.hooks = {};
+    if (!settings.hooks['PreToolUse']) settings.hooks['PreToolUse'] = [];
+    settings.hooks['PreToolUse'].push({
+      matcher: '',
+      hooks: [{ command: THIRD_PARTY_MARKER }],
+    });
+    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+
+    // Sanity: both entries present before uninstall.
+    let now = readClaudeSettings(tmpHome);
+    expect(pixelAgentsHookPresent(now, 'PreToolUse')).toBe(true);
+    expect(thirdPartyHookPresent(now, 'PreToolUse', THIRD_PARTY_MARKER)).toBe(true);
+
+    // Uninstall via Settings toggle.
+    await setSettings(frame, { hooksEnabled: false });
+    await expect
+      .poll(() => pixelAgentsHookPresent(readClaudeSettings(tmpHome), 'PreToolUse'), {
+        timeout: 5_000,
+      })
+      .toBe(false);
+
+    // The third-party hook must still be there.
+    now = readClaudeSettings(tmpHome);
+    expect(thirdPartyHookPresent(now, 'PreToolUse', THIRD_PARTY_MARKER)).toBe(true);
   });
 });

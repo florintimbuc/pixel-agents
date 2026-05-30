@@ -1,5 +1,12 @@
-import type { Frame, Locator } from '@playwright/test';
+import type { Frame, Locator, Page } from '@playwright/test';
 import { expect } from '@playwright/test';
+
+/**
+ * Overlay helpers work the same against a VS Code webview iframe (Frame) and
+ * a standalone browser page (Page). Both Playwright surfaces expose `locator`
+ * with identical semantics for the queries used here.
+ */
+type OverlaySurface = Frame | Page;
 
 const OVERLAY_TIMEOUT_MS = 15_000;
 
@@ -24,27 +31,27 @@ const OVERLAY_TIMEOUT_MS = 15_000;
  *    match, not after the state holds for N seconds.
  */
 
-export function getAgentOverlays(frame: Frame): Locator {
+export function getAgentOverlays(frame: OverlaySurface): Locator {
   return frame.locator('[data-testid="agent-overlay"]');
 }
 
-export function getOverlayByText(frame: Frame, text: string): Locator {
+export function getOverlayByText(frame: OverlaySurface, text: string): Locator {
   return getAgentOverlays(frame).filter({ hasText: text });
 }
 
-export function getOverlayByTexts(frame: Frame, texts: string[]): Locator {
+export function getOverlayByTexts(frame: OverlaySurface, texts: string[]): Locator {
   return texts.reduce<Locator>(
     (locator, text) => locator.filter({ hasText: text }),
     getAgentOverlays(frame),
   );
 }
 
-export function getOverlayByAgentId(frame: Frame, agentId: number): Locator {
+export function getOverlayByAgentId(frame: OverlaySurface, agentId: number): Locator {
   return frame.locator(`[data-testid="agent-overlay"][data-agent-id="${agentId}"]`);
 }
 
 export async function expectOverlayCount(
-  frame: Frame,
+  frame: OverlaySurface,
   count: number,
   timeout = OVERLAY_TIMEOUT_MS,
 ): Promise<void> {
@@ -52,7 +59,7 @@ export async function expectOverlayCount(
 }
 
 export async function expectOverlayVisible(
-  frame: Frame,
+  frame: OverlaySurface,
   text: string,
   timeout = OVERLAY_TIMEOUT_MS,
 ): Promise<void> {
@@ -60,7 +67,7 @@ export async function expectOverlayVisible(
 }
 
 export async function expectOverlayVisibleWithTexts(
-  frame: Frame,
+  frame: OverlaySurface,
   texts: string[],
   timeout = OVERLAY_TIMEOUT_MS,
 ): Promise<void> {
@@ -68,7 +75,7 @@ export async function expectOverlayVisibleWithTexts(
 }
 
 export async function expectOverlayVisibleForAgent(
-  frame: Frame,
+  frame: OverlaySurface,
   agentId: number,
   text: string,
   timeout = OVERLAY_TIMEOUT_MS,
@@ -78,19 +85,23 @@ export async function expectOverlayVisibleForAgent(
   });
 }
 
-export async function expectNoOverlay(frame: Frame, text: string, timeout = 1_000): Promise<void> {
+export async function expectNoOverlay(
+  frame: OverlaySurface,
+  text: string,
+  timeout = 1_000,
+): Promise<void> {
   await expect(getOverlayByText(frame, text)).toHaveCount(0, { timeout });
 }
 
 export async function expectNoOverlayWithTexts(
-  frame: Frame,
+  frame: OverlaySurface,
   texts: string[],
   timeout = 1_000,
 ): Promise<void> {
   await expect(getOverlayByTexts(frame, texts)).toHaveCount(0, { timeout });
 }
 
-export async function readAgentOverlayIds(frame: Frame): Promise<number[]> {
+export async function readAgentOverlayIds(frame: OverlaySurface): Promise<number[]> {
   const rawIds = await getAgentOverlays(frame).evaluateAll((elements) =>
     elements.map((element) => element.getAttribute('data-agent-id')),
   );
@@ -102,7 +113,7 @@ export async function readAgentOverlayIds(frame: Frame): Promise<number[]> {
 }
 
 export async function readAgentOverlayTexts(
-  frame: Frame,
+  frame: OverlaySurface,
 ): Promise<Array<{ id: number; text: string }>> {
   return getAgentOverlays(frame).evaluateAll((elements) =>
     elements.flatMap((element) => {
@@ -121,7 +132,7 @@ export async function readAgentOverlayTexts(
   );
 }
 
-export async function expectSingleAgentOverlay(frame: Frame): Promise<number> {
+export async function expectSingleAgentOverlay(frame: OverlaySurface): Promise<number> {
   await expectOverlayCount(frame, 1);
   const ids = await readAgentOverlayIds(frame);
   if (ids.length !== 1) {
@@ -131,7 +142,7 @@ export async function expectSingleAgentOverlay(frame: Frame): Promise<number> {
 }
 
 export async function closeAgentFromOverlay(
-  frame: Frame,
+  frame: OverlaySurface,
   options: { agentId?: number; text?: string },
   timeout = OVERLAY_TIMEOUT_MS,
 ): Promise<void> {

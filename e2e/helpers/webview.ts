@@ -1,6 +1,13 @@
 import type { Frame, Locator, Page } from '@playwright/test';
 import { expect } from '@playwright/test';
 
+/**
+ * Settings/modal helpers work the same against a VS Code webview iframe
+ * (Frame) and the standalone browser page (Page) — both expose Playwright's
+ * Locator API. The settings UI is the same React component in both contexts.
+ */
+type WebviewSurface = Frame | Page;
+
 const WEBVIEW_TIMEOUT_MS = 30_000;
 const PANEL_OPEN_TIMEOUT_MS = 15_000;
 const MIN_PANEL_HEIGHT_PX = 320;
@@ -198,7 +205,7 @@ async function setCheckbox(modal: Locator, label: string, checked: boolean): Pro
   }
 }
 
-async function openSettingsModal(frame: Frame): Promise<Locator> {
+async function openSettingsModal(frame: WebviewSurface): Promise<Locator> {
   const settingsButton = frame.locator('button', { hasText: 'Settings' });
   await expect(settingsButton).toBeVisible({ timeout: WEBVIEW_TIMEOUT_MS });
   await settingsButton.click();
@@ -217,7 +224,21 @@ async function closeSettingsModal(settingsModal: Locator): Promise<void> {
   await expect(settingsModal).toBeHidden({ timeout: WEBVIEW_TIMEOUT_MS });
 }
 
-export async function setSettings(frame: Frame, settings: WebviewSettings): Promise<void> {
+/**
+ * Read the checked state of a Settings modal toggle without changing it.
+ * Used by C13 (settings persistence) to assert state survives a panel reload.
+ */
+export async function getSettingChecked(frame: WebviewSurface, label: string): Promise<boolean> {
+  const settingsModal = await openSettingsModal(frame);
+  const button = settingsModal.locator('button', { hasText: label });
+  await expect(button).toBeVisible({ timeout: WEBVIEW_TIMEOUT_MS });
+  const indicator = button.locator('span').last();
+  const checked = ((await indicator.textContent()) ?? '').trim().toLowerCase() === 'x';
+  await closeSettingsModal(settingsModal);
+  return checked;
+}
+
+export async function setSettings(frame: WebviewSurface, settings: WebviewSettings): Promise<void> {
   const settingsModal = await openSettingsModal(frame);
 
   if (settings.watchAllSessions !== undefined) {
@@ -244,7 +265,7 @@ export async function setSettings(frame: Frame, settings: WebviewSettings): Prom
  * - Watch All Sessions, so hooks-only external sessions are adopted
  * - Always Show Labels, so the normal office view exposes stable overlay text
  */
-export async function configureHookServerTestSettings(frame: Frame): Promise<void> {
+export async function configureHookServerTestSettings(frame: WebviewSurface): Promise<void> {
   await setSettings(frame, {
     watchAllSessions: true,
     hooksEnabled: true,
