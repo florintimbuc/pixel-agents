@@ -300,6 +300,8 @@ function App() {
                   onWallColorChange={editor.handleWallColorChange}
                   onWallSetChange={editor.handleWallSetChange}
                   onSelectedFurnitureColorChange={editor.handleSelectedFurnitureColorChange}
+                  pickedFurnitureColor={editorState.pickedFurnitureColor}
+                  onPickedFurnitureColorChange={editor.handlePickedFurnitureColorChange}
                   onFurnitureTypeChange={editor.handleFurnitureTypeChange}
                   loadedAssets={loadedAssets}
                   activePetTypes={officeState.getActivePetTypes()}
@@ -311,8 +313,6 @@ function App() {
                   onCarpetVariantChange={editor.handleCarpetVariantChange}
                   onCarpetColorChange={editor.handleCarpetColorChange}
                   onCarpetAccentColorChange={editor.handleCarpetAccentColorChange}
-                  onResetCarpetColor={editor.handleResetCarpetColor}
-                  onResetCarpetAccentColor={editor.handleResetCarpetAccentColor}
                   areas={officeState.getLayout().areas ?? []}
                   selectedAreaLabel={editor.selectedAreaLabel}
                   workspaceFolders={workspaceFolders}

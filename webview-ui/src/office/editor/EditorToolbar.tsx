@@ -1,3 +1,4 @@
+import type { CSSProperties } from 'react';
 import { useEffect, useMemo, useState } from 'react';
 
 import { Button } from '../../components/ui/Button.js';
@@ -52,6 +53,9 @@ interface EditorToolbarProps {
   onWallColorChange: (color: ColorValue) => void;
   onWallSetChange: (setIndex: number) => void;
   onSelectedFurnitureColorChange: (color: ColorValue | null) => void;
+  /** Color applied to newly placed furniture (tints the palette + ghost). */
+  pickedFurnitureColor: ColorValue | null;
+  onPickedFurnitureColorChange: (color: ColorValue | null) => void;
   onFurnitureTypeChange: (type: string) => void;
   loadedAssets?: LoadedAssetData;
   activePetTypes: number[];
@@ -64,8 +68,6 @@ interface EditorToolbarProps {
   onCarpetVariantChange: (variant: number) => void;
   onCarpetColorChange: (color: ColorValue) => void;
   onCarpetAccentColorChange: (color: ColorValue) => void;
-  onResetCarpetColor: () => void;
-  onResetCarpetAccentColor: () => void;
   // Area state + handlers
   areas: AreaDefinition[];
   selectedAreaLabel: string | null;
@@ -98,6 +100,8 @@ export function EditorToolbar({
   onWallColorChange,
   onWallSetChange,
   onSelectedFurnitureColorChange,
+  pickedFurnitureColor,
+  onPickedFurnitureColorChange,
   onFurnitureTypeChange,
   loadedAssets,
   activePetTypes,
@@ -109,8 +113,6 @@ export function EditorToolbar({
   onCarpetVariantChange,
   onCarpetColorChange,
   onCarpetAccentColorChange,
-  onResetCarpetColor,
-  onResetCarpetAccentColor,
   areas,
   selectedAreaLabel,
   workspaceFolders,
@@ -127,7 +129,6 @@ export function EditorToolbar({
   const [showWallColor, setShowWallColor] = useState(false);
   const [showFurnitureColor, setShowFurnitureColor] = useState(false);
   const [showCarpetColor, setShowCarpetColor] = useState(false);
-  const [showCarpetAccent, setShowCarpetAccent] = useState(false);
 
   // Build dynamic catalog from loaded assets
   useEffect(() => {
@@ -181,14 +182,51 @@ export function EditorToolbar({
   const carpetVariantCount = getCarpetSetCount();
   const hasWorkspaceFolders = workspaceFolders.length > 0;
 
-  /** Build a junction sprite preview for the variant carousel thumbnail. */
-  const buildCarpetPreview = (variant: number): SpriteData | null => {
-    if (!hasCarpetSprites()) return null;
-    // Synthesize a 2×2 grid where all 4 cells have the same variant; junction at (1,1)
-    // produces msCase=15 (interior piece) — the "most representative" tile.
-    const tile: CarpetTile = { variant };
-    const fake: Array<CarpetTile | null> = [tile, tile, tile, tile];
-    return getCarpetJunctionSprite(1, 1, variant, fake, 2, 2, carpetColor, carpetAccentColor);
+  /**
+   * Draw a small carpet patch into the variant thumbnail. Rendering a 2×1 strip
+   * (rather than a single interior tile) means the patch's outer edges resolve
+   * to perimeter marching-squares cases, so the accent trim — which never
+   * appears on the solid interior piece — is visible in the preview.
+   */
+  const drawCarpetPreview = (
+    ctx: CanvasRenderingContext2D,
+    w: number,
+    h: number,
+    variant: number,
+  ): void => {
+    if (!hasCarpetSprites()) {
+      ctx.fillStyle = CANVAS_FALLBACK_TILE_COLOR;
+      ctx.fillRect(0, 0, w, h);
+      return;
+    }
+    const previewCols = 2;
+    const previewRows = 1;
+    const tileSize = 16;
+    const originX = Math.floor((w - previewCols * tileSize) / 2);
+    const originY = Math.floor((h - previewRows * tileSize) / 2);
+    const tile: CarpetTile = { variant, color: carpetColor, accentColor: carpetAccentColor };
+    // 2×1 strip; trailing nulls are out of bounds and ignored by tileHasVariant.
+    const fake: Array<CarpetTile | null> = [tile, tile];
+    for (let jy = 0; jy <= previewRows; jy++) {
+      for (let jx = 0; jx <= previewCols; jx++) {
+        const sprite: SpriteData | null = getCarpetJunctionSprite(
+          jx,
+          jy,
+          variant,
+          fake,
+          previewCols,
+          previewRows,
+          carpetColor,
+          carpetAccentColor,
+        );
+        if (!sprite) continue;
+        ctx.drawImage(
+          getCachedSprite(sprite, 1),
+          originX + jx * tileSize - tileSize / 2,
+          originY + jy * tileSize - tileSize / 2,
+        );
+      }
+    }
   };
 
   return (
@@ -217,7 +255,15 @@ export function EditorToolbar({
           onClick={() => onToolChange(EditTool.WALL_PAINT)}
           title="Paint walls (click to toggle)"
         >
-          Wall
+          Walls
+        </Button>
+        <Button
+          variant={isPetsActive ? 'active' : 'default'}
+          size="md"
+          onClick={() => onToolChange(EditTool.PETS)}
+          title="Place pets"
+        >
+          Pets
         </Button>
         {hasWorkspaceFolders && (
           <Button
@@ -237,14 +283,6 @@ export function EditorToolbar({
         >
           Erase
         </Button>
-        <Button
-          variant={isPetsActive ? 'active' : 'default'}
-          size="md"
-          onClick={() => onToolChange(EditTool.PETS)}
-          title="Place pets"
-        >
-          Pets
-        </Button>
       </div>
 
       {/* Sub-panel: Floor tiles — stacked bottom-to-top via column-reverse */}
@@ -253,14 +291,6 @@ export function EditorToolbar({
           {/* Color toggle + Pick — just above tool row */}
           <div className="flex gap-4 items-center">
             <Button
-              variant={showColor ? 'active' : 'default'}
-              size="sm"
-              onClick={() => setShowColor((v) => !v)}
-              title="Adjust floor color"
-            >
-              Color
-            </Button>
-            <Button
               variant={activeTool === EditTool.EYEDROPPER ? 'active' : 'ghost'}
               size="sm"
               onClick={() => onToolChange(EditTool.EYEDROPPER)}
@@ -268,12 +298,17 @@ export function EditorToolbar({
             >
               Pick
             </Button>
+            <Button
+              variant={showColor ? 'active' : 'ghost'}
+              size="sm"
+              onClick={() => setShowColor((v) => !v)}
+              title="Adjust floor color"
+            >
+              Color
+            </Button>
           </div>
 
-          {/* Color controls (collapsible) — above Wall/Color/Pick */}
-          {showColor && <ColorPicker value={floorColor} onChange={onFloorColorChange} colorize />}
-
-          {/* Floor pattern horizontal carousel — at the top */}
+          {/* Floor pattern horizontal carousel — below the color controls */}
           <div className="carousel">
             {floorPatterns.map((patIdx) => (
               <ItemSelect
@@ -296,6 +331,9 @@ export function EditorToolbar({
               />
             ))}
           </div>
+
+          {/* Color controls (collapsible) — at the top, above the previews. */}
+          {showColor && <TileColorBox value={floorColor} onChange={onFloorColorChange} />}
         </div>
       )}
 
@@ -314,10 +352,7 @@ export function EditorToolbar({
             </Button>
           </div>
 
-          {/* Color controls (collapsible) */}
-          {showWallColor && <ColorPicker value={wallColor} onChange={onWallColorChange} colorize />}
-
-          {/* Wall set picker — horizontal carousel at the top */}
+          {/* Wall set picker — horizontal carousel, below the color controls */}
           {getWallSetCount() > 0 && (
             <div className="carousel">
               {Array.from({ length: getWallSetCount() }, (_, i) => (
@@ -347,6 +382,9 @@ export function EditorToolbar({
               ))}
             </div>
           )}
+
+          {/* Color controls (collapsible) — at the top, above the previews. */}
+          {showWallColor && <TileColorBox value={wallColor} onChange={onWallColorChange} />}
         </div>
       )}
 
@@ -473,74 +511,42 @@ export function EditorToolbar({
                 Pick
               </Button>
             )}
+            {/* Color toggle — available across the whole Furniture tab. Carpet
+                edits main+accent; other categories edit the new-furniture color. */}
+            <Button
+              variant={
+                (activeCategory === CARPET_CATEGORY_ID ? showCarpetColor : showFurnitureColor)
+                  ? 'active'
+                  : 'ghost'
+              }
+              size="sm"
+              onClick={() =>
+                activeCategory === CARPET_CATEGORY_ID
+                  ? setShowCarpetColor((v) => !v)
+                  : setShowFurnitureColor((v) => !v)
+              }
+              title={
+                activeCategory === CARPET_CATEGORY_ID
+                  ? 'Adjust carpet main + accent colors'
+                  : 'Adjust color for new furniture'
+              }
+            >
+              Color
+            </Button>
           </div>
 
-          {/* Carpet sub-panel: color controls + accent + variant carousel */}
+          {/* Carpet sub-panel: variant carousel + compact color controls.
+              Column-reverse stacks the pickers on top, then the variant
+              previews, then the category tabs. */}
           {activeCategory === CARPET_CATEGORY_ID && (
             <>
-              {/* Color toggle buttons */}
-              <div className="flex gap-4 items-center">
-                <Button
-                  variant={showCarpetColor ? 'active' : 'default'}
-                  size="sm"
-                  onClick={() => setShowCarpetColor((v) => !v)}
-                  title="Adjust carpet main color"
-                >
-                  Color
-                </Button>
-                <Button
-                  variant={showCarpetAccent ? 'active' : 'default'}
-                  size="sm"
-                  onClick={() => setShowCarpetAccent((v) => !v)}
-                  title="Adjust carpet accent color"
-                >
-                  Accent
-                </Button>
-              </div>
-
-              {/* Collapsible visual color pickers */}
-              {showCarpetColor && (
-                <div className="flex flex-col gap-4">
-                  <VisualColorPicker
-                    label="Main Color"
-                    value={carpetColor}
-                    onChange={onCarpetColorChange}
-                  />
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={onResetCarpetColor}
-                    title="Reset main color to default"
-                  >
-                    Reset
-                  </Button>
-                </div>
-              )}
-              {showCarpetAccent && (
-                <div className="flex flex-col gap-4">
-                  <VisualColorPicker
-                    label="Accent Color"
-                    value={carpetAccentColor}
-                    onChange={onCarpetAccentColorChange}
-                  />
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={onResetCarpetAccentColor}
-                    title="Reset accent color to default"
-                  >
-                    Reset
-                  </Button>
-                </div>
-              )}
-
-              {/* Variant carousel */}
+              {/* Variant carousel — below the color controls */}
               <div className="carousel">
                 {Array.from({ length: carpetVariantCount }, (_, i) => i).map((variantIdx) => (
                   <ItemSelect
                     key={variantIdx}
-                    width={thumbSize}
-                    height={thumbSize}
+                    width={48}
+                    height={32}
                     selected={carpetVariant === variantIdx}
                     onClick={() => {
                       onCarpetVariantChange(variantIdx);
@@ -550,26 +556,37 @@ export function EditorToolbar({
                     }}
                     title={`Carpet ${variantIdx + 1}`}
                     deps={[variantIdx, carpetColor, carpetAccentColor]}
-                    draw={(ctx, w, h) => {
-                      const sprite: SpriteData | null = buildCarpetPreview(variantIdx);
-                      if (!sprite) {
-                        ctx.fillStyle = CANVAS_FALLBACK_TILE_COLOR;
-                        ctx.fillRect(0, 0, w, h);
-                        return;
-                      }
-                      const cached = getCachedSprite(sprite, 2);
-                      const scale = Math.min(w / cached.width, h / cached.height) * 0.95;
-                      const dw = cached.width * scale;
-                      const dh = cached.height * scale;
-                      ctx.drawImage(cached, (w - dw) / 2, (h - dh) / 2, dw, dh);
-                    }}
+                    draw={(ctx, w, h) => drawCarpetPreview(ctx, w, h, variantIdx)}
                   />
                 ))}
               </div>
+
+              {/* Compact Main/Accent pickers — collapsible, at the top.
+                  Each is a swatch + hex that opens its picker popup on click. */}
+              {showCarpetColor && (
+                <div className="flex gap-8 ml-2 mb-6 -mt-6">
+                  <div className="flex flex-col gap-2">
+                    <span className="text-xs uppercase tracking-[0.08em] text-text-muted">
+                      Main
+                    </span>
+                    <VisualColorPicker value={carpetColor} onChange={onCarpetColorChange} />
+                  </div>
+                  <div className="flex flex-col gap-2">
+                    <span className="text-xs uppercase tracking-[0.08em] text-text-muted">
+                      Accent
+                    </span>
+                    <VisualColorPicker
+                      value={carpetAccentColor}
+                      onChange={onCarpetAccentColorChange}
+                    />
+                  </div>
+                </div>
+              )}
             </>
           )}
 
-          {/* Furniture items grid — hidden when carpet category is active */}
+          {/* Furniture items grid — hidden when carpet category is active.
+              Thumbnails preview the new-furniture color so you see what places. */}
           {activeCategory !== CARPET_CATEGORY_ID && (
             <div className="carousel">
               {categoryItems.map((entry) => (
@@ -580,9 +597,16 @@ export function EditorToolbar({
                   selected={selectedFurnitureType === entry.type}
                   onClick={() => onFurnitureTypeChange(entry.type)}
                   title={entry.label}
-                  deps={[entry.type, entry.sprite]}
+                  deps={[entry.type, entry.sprite, pickedFurnitureColor]}
                   draw={(ctx, w, h) => {
-                    const cached = getCachedSprite(entry.sprite, 2);
+                    const sprite = pickedFurnitureColor
+                      ? getColorizedSprite(
+                          `thumb-${entry.type}-${pickedFurnitureColor.h}-${pickedFurnitureColor.s}-${pickedFurnitureColor.b}-${pickedFurnitureColor.c}-${pickedFurnitureColor.colorize ?? ''}`,
+                          entry.sprite,
+                          pickedFurnitureColor,
+                        )
+                      : entry.sprite;
+                    const cached = getCachedSprite(sprite, 2);
                     const scale = Math.min(w / cached.width, h / cached.height) * 0.85;
                     const dw = cached.width * scale;
                     const dh = cached.height * scale;
@@ -591,6 +615,17 @@ export function EditorToolbar({
                 />
               ))}
             </div>
+          )}
+
+          {/* New-furniture color picker — collapsible, above the palette. Editing
+              an already-placed selection is handled by the panel below. */}
+          {activeCategory !== CARPET_CATEGORY_ID && showFurnitureColor && !selectedFurnitureUid && (
+            <ColorPicker
+              value={pickedFurnitureColor ?? DEFAULT_FURNITURE_COLOR}
+              onChange={onPickedFurnitureColorChange}
+              showColorizeToggle
+              onReset={() => onPickedFurnitureColorChange(null)}
+            />
           )}
         </div>
       )}
@@ -627,6 +662,44 @@ export function EditorToolbar({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Floor/wall color control: a boxed panel with a "Color" row (carpet-style
+ * swatch + hex that opens the visual picker) and a "Contrast" row. Floors and
+ * walls always colorize, so there's no colorize toggle — just hue/sat/bright
+ * via the popup, plus contrast (which matters since colorizeSprite uses each
+ * pattern pixel's luminance).
+ */
+function TileColorBox({
+  value,
+  onChange,
+}: {
+  value: ColorValue;
+  onChange: (color: ColorValue) => void;
+}) {
+  const contrastFill = ((value.c + 100) / 200) * 100;
+  return (
+    <div className="flex flex-col gap-4 py-8 px-10 bg-bg-dark border-2 border-border rounded-none">
+      <div className="flex items-center gap-8">
+        <span className="text-sm text-text-muted w-64 shrink-0">Color</span>
+        <VisualColorPicker value={value} onChange={onChange} />
+      </div>
+      <div className="flex items-center gap-8">
+        <span className="text-sm text-text-muted w-64 shrink-0">Contrast</span>
+        <input
+          type="range"
+          min={-100}
+          max={100}
+          value={value.c}
+          onChange={(e) => onChange({ ...value, c: Number(e.target.value) })}
+          className="pixel-range flex-1 min-w-0"
+          style={{ '--range-fill': `${contrastFill}%` } as CSSProperties}
+        />
+        <span className="text-sm text-text w-44 text-right shrink-0 tabular-nums">{value.c}</span>
+      </div>
     </div>
   );
 }
