@@ -111,7 +111,7 @@ async function verifyInstalledTarball(tarballPath) {
   fs.mkdirSync(path.join(smokeHome, '.pixel-agents'), { recursive: true });
   fs.writeFileSync(
     path.join(smokeHome, '.pixel-agents', 'config.json'),
-    JSON.stringify({ hooksConsentGiven: true }),
+    JSON.stringify({ hooksConsent: { claude: 'granted' } }),
   );
   fs.writeFileSync(
     path.join(smokeProject, 'package.json'),

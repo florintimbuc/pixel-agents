@@ -101,13 +101,10 @@ test.describe('Standalone / hooks', () => {
 });
 
 /**
- * The standalone consent path end to end.
- *
- * The fixture normally seeds `hooksConsentGiven: true`; these specs opt out,
- * so the CLI starts with nothing installed and the server asks over the
- * tokened /ws handshake — the SAME in-app dialog the VS Code webview shows
- * (e2e/tests/claude/hooks-on/consent.spec.ts pins that surface; here the pins
- * are the standalone-only halves: the token boundary and the checkbox route).
+ * The standalone consent path end to end. The fixture normally seeds a granted Claude consent; these opt out, so the
+ * CLI starts with nothing installed and the server asks over the tokened /ws handshake — the SAME in-app dialog the
+ * VS Code webview shows (pinned in claude/hooks-on/consent.spec.ts). Here the pins are the standalone-only halves:
+ * the token boundary and the checkbox route.
  */
 test.describe('Standalone / hooks consent', () => {
   test.use({ seedHooksConsent: false });
@@ -115,7 +112,8 @@ test.describe('Standalone / hooks consent', () => {
   function readConsentFrom(tmpHome: string): boolean {
     try {
       const raw = fs.readFileSync(path.join(tmpHome, '.pixel-agents', 'config.json'), 'utf8');
-      return (JSON.parse(raw) as { hooksConsentGiven?: boolean }).hooksConsentGiven === true;
+      const consent = (JSON.parse(raw) as { hooksConsent?: Record<string, string> }).hooksConsent;
+      return consent?.claude === 'granted';
     } catch {
       return false;
     }

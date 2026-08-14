@@ -19,10 +19,15 @@ import {
   loadAllPets,
 } from './assetReload.js';
 import type { AssetCache, ReloadAssetsSideEffect } from './clientMessageHandler.js';
-import { grantHooksConsent, readConfig } from './configPersistence.js';
+import {
+  getHooksConsent,
+  getHooksEnabled,
+  grantHooksConsent,
+  readConfig,
+} from './configPersistence.js';
 import { MAX_PORT, MIN_PORT } from './constants.js';
 import { FileStateAdapter } from './fileStateAdapter.js';
-import { claudeProvider, copyHookScript } from './providers/index.js';
+import { claudeProvider, copyHookScript, hookProviderById } from './providers/index.js';
 import { PixelAgentsServer } from './server.js';
 
 // ── Argument parsing ──────────────────────────────────────────
@@ -145,17 +150,28 @@ async function main(): Promise<void> {
       runtime.handleHookEvent(providerId, event);
     });
 
-    // onSetHooksEnabled side effect: install/uninstall hooks when user toggles in UI.
+    // onSetHooksEnabled side effect: install/uninstall the named provider's
+    // hooks when the user toggles in the UI (or answers the consent ask).
     // Captures config from the outer scope after server.start().
     let currentConfig: { port: number; token: string } | null = null;
-    const onSetHooksEnabled = async (enabled: boolean): Promise<void> => {
+    const onSetHooksEnabled = async (providerId: string, enabled: boolean): Promise<void> => {
       if (!currentConfig) return;
+      const provider = hookProviderById(providerId);
+      if (!provider) return; // unknown id: nothing to install into
       if (enabled) {
-        // An explicit toggle in the UI IS the consent to modify settings.json.
-        grantHooksConsent();
-        if (!copyHookScriptOrReport(packageRoot, ' (user toggle)')) return;
+        // An explicit toggle in the UI IS the consent to modify the
+        // provider's settings file. The bundled claude-hook.js script belongs
+        // to the Claude provider alone; another provider's install must
+        // neither copy it nor be blocked by it.
+        grantHooksConsent(provider.id);
+        if (
+          provider.id === claudeProvider.id &&
+          !copyHookScriptOrReport(packageRoot, ' (user toggle)')
+        ) {
+          return;
+        }
         try {
-          await claudeProvider.installHooks(
+          await provider.installHooks(
             `http://127.0.0.1:${currentConfig.port}`,
             currentConfig.token,
           );
@@ -166,7 +182,7 @@ async function main(): Promise<void> {
         console.log('[Pixel Agents] Hooks installed (user toggle)');
       } else {
         try {
-          await claudeProvider.uninstallHooks();
+          await provider.uninstallHooks();
           console.log('[Pixel Agents] Hooks uninstalled (user toggle)');
         } catch (err) {
           console.error(`[Pixel Agents] ${err instanceof Error ? err.message : String(err)}`);
@@ -224,14 +240,16 @@ async function main(): Promise<void> {
     });
     currentConfig = { port: config.port, token: config.token };
 
-    // Sync runtime refs with persisted settings BEFORE first scan tick
-    runtime.hooksEnabled.current = adapter.getSetting('pixel-agents.hooksEnabled', true);
+    // Sync runtime refs with persisted settings BEFORE first scan tick. The
+    // runtime's single hooksEnabled ref follows the Claude provider until the
+    // scanners grow per-provider awareness alongside the Settings UI.
+    runtime.hooksEnabled.current = getHooksEnabled(claudeProvider.id);
     runtime.watchAllSessions.current = adapter.getSetting('pixel-agents.watchAllSessions', false);
 
     // Install hooks on startup if the persisted setting says so — gated on the
     // one-time consent to modify ~/.claude/settings.json.
     if (runtime.hooksEnabled.current) {
-      let consent = readConfig().hooksConsentGiven;
+      let consent = getHooksConsent(claudeProvider.id) === 'granted';
       if (!consent && (await claudeProvider.areHooksInstalled())) {
         // Our hooks are already installed and already firing — a pre-consent
         // version put them there. Grant and continue with NO prompt: the
@@ -241,7 +259,7 @@ async function main(): Promise<void> {
         // this user no protection they do not already have, so they are not
         // asked. A fresh install still is, in full — in the browser UI, when a
         // tokened client connects (clientMessageHandler's webviewReady).
-        grantHooksConsent();
+        grantHooksConsent(claudeProvider.id);
         consent = true;
       }
       if (!consent) {

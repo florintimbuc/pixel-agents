@@ -211,7 +211,7 @@ export const TOOL_OVERLAY_VERTICAL_OFFSET = 32;
  *  ids (positive) and sub-agent ids (small negatives from -1 down). */
 export const GREETER_ID = -1_000_000_000;
 /** Stacking order for the Intro's bubble. Deliberately BELOW the modal stack
- *  (ui/Modal defaults to 50, ChangelogModal 51, the migration notice 52): the
+ *  (ui/Modal defaults to 50, ChangelogModal 51, the migration notice z-100): the
  *  Intro is diegetic furniture over the office, not a modal, so a modal opened
  *  on top of it must cover it rather than slide underneath. */
 export const INTRO_BUBBLE_Z_INDEX = 45;

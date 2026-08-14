@@ -92,14 +92,14 @@ export async function launchVSCode(
   // (buildSeedConfig in layout-seed.ts carries the same baseline).
   const paDir = path.join(tmpHome, '.pixel-agents');
   fs.mkdirSync(paDir, { recursive: true });
-  // hooksConsentGiven is part of the baseline: without it the first-run consent
+  // The granted hooksConsent entry is part of the baseline: without it the first-run consent
   // dialog pops up inside the webview on open, gating hook installation and
   // overlaying the office UI no test expects to be covered. The consent specs
   // opt out via opts.seedConfig — they are the only ones that want the dialog.
   const seedConfig = opts.seedConfig ?? {
     vscode: { alwaysShowLabels: true },
     standalone: { alwaysShowLabels: true },
-    hooksConsentGiven: true,
+    hooksConsent: { claude: 'granted' },
   };
   fs.writeFileSync(path.join(paDir, 'config.json'), JSON.stringify(seedConfig, null, 2));
   if (opts.seedLayout !== undefined) {

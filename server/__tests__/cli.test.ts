@@ -333,9 +333,11 @@ describe('dist/cli.js entry-point guard', () => {
 
       const configPath = path.join(tmpHome, '.pixel-agents', 'config.json');
       const consent = (
-        JSON.parse(fs.readFileSync(configPath, 'utf-8')) as { hooksConsentGiven?: boolean }
-      ).hooksConsentGiven;
-      expect(consent).toBe(true);
+        JSON.parse(fs.readFileSync(configPath, 'utf-8')) as {
+          hooksConsent?: Record<string, string>;
+        }
+      ).hooksConsent?.claude;
+      expect(consent).toBe('granted');
 
       // ZERO friction: nothing that reads as a question or a deferral was
       // printed. The prompt headline, the [Y/n/never] question, and both
@@ -357,7 +359,7 @@ describe('dist/cli.js entry-point guard', () => {
     fs.mkdirSync(path.join(tmpHome, '.pixel-agents'), { recursive: true });
     fs.writeFileSync(
       path.join(tmpHome, '.pixel-agents', 'config.json'),
-      JSON.stringify({ hooksConsentGiven: true }),
+      JSON.stringify({ hooksConsent: { claude: 'granted' } }),
     );
     // hooks/ is a FILE, so copying into hooks/claude-hook.js fails.
     fs.writeFileSync(path.join(tmpHome, '.pixel-agents', 'hooks'), 'not a directory');
@@ -379,7 +381,7 @@ describe('dist/cli.js entry-point guard', () => {
     fs.mkdirSync(path.join(tmpHome, '.pixel-agents'), { recursive: true });
     fs.writeFileSync(
       path.join(tmpHome, '.pixel-agents', 'config.json'),
-      JSON.stringify({ hooksConsentGiven: true }),
+      JSON.stringify({ hooksConsent: { claude: 'granted' } }),
     );
     const port = await getFreePort();
     const child = spawn(

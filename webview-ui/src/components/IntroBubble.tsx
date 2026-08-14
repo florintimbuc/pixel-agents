@@ -41,6 +41,11 @@ interface IntroBubbleProps {
    *  itself — an unanswered consent step changes nothing and the whole Intro
    *  returns the next time the office is opened. */
   onClose: () => void;
+  /** True while another surface owns Escape — an open Settings/changelog modal
+   *  (stacked ABOVE this bubble) or the layout editor's multi-stage Esc
+   *  ladder. Escape aborts the tour only when the tour is topmost; without
+   *  this gate it silently aborted UNDER an open modal. */
+  escapeSuppressed: boolean;
 }
 
 const STEP_COUNT = 4;
@@ -92,6 +97,7 @@ export function IntroBubble({
   installFailed,
   onChoice,
   onClose,
+  escapeSuppressed,
 }: IntroBubbleProps) {
   const bubbleRef = useRef<HTMLDivElement>(null);
   const [, setTick] = useState(0);
@@ -104,12 +110,13 @@ export function IntroBubble({
   }, [officeState]);
 
   useEffect(() => {
+    if (escapeSuppressed) return;
     const onKeyDown = (e: KeyboardEvent): void => {
       if (e.key === 'Escape') onClose();
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [onClose]);
+  }, [onClose, escapeSuppressed]);
 
   // Per-frame tick (same pattern as ToolOverlay): re-render — the greeter's
   // matrix effect, a pan, and the camera drift all move the anchor between

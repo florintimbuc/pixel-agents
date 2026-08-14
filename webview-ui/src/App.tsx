@@ -156,6 +156,10 @@ function App() {
     onClose: handleIntroClose,
   } = useIntroTour({ consentRequest, hooksInstalled, hooksStatusSeq, dismissConsentRequest });
 
+  // The Settings surface renders one provider today; its checkbox binds to
+  // the Claude row of the per-provider install-state map.
+  const claudeHooksInstalled = hooksInstalled['claude'] === true;
+
   // Mutate folder→Area mappings locally + send to server. Updates OfficeState in
   // the same tick so a follow-up agentCreated picks up the new mapping.
   const handleAreaMappingChange = useCallback(
@@ -449,7 +453,7 @@ function App() {
           message), NOT the hooksEnabled preference: hooksEnabled defaults true
           while first-run consent is still pending, and announcing "Instant
           Detection Active" before anything is installed would be a lie. */}
-      {hooksEnabled && hooksInstalled && !hooksInfoShown && !hooksTooltipDismissed && (
+      {hooksEnabled && claudeHooksInstalled && !hooksInfoShown && !hooksTooltipDismissed && (
         <Tooltip
           title="Instant Detection Active"
           position="top-right"
@@ -546,17 +550,22 @@ function App() {
           setWatchAllSessions(newVal);
           transport.send({ type: 'setWatchAllSessions', enabled: newVal });
         }}
-        hooksInstalled={hooksInstalled}
+        hooksInstalled={claudeHooksInstalled}
         onToggleHooksEnabled={() => {
-          // Toggle the DISPLAYED state (actual install), not the preference:
-          // when the two disagree — preference on, nothing installed because
-          // consent is still pending — toggling the preference would invert
-          // the user's intent and turn hooks OFF when they asked for ON.
-          // Deliberately no local optimistic update: both backends answer with
-          // a truthful hooksStatus, which is the only thing this checkbox
-          // renders, so it lands correct rather than flickering right-then-wrong
-          // when an install fails.
-          transport.send({ type: 'setHooksEnabled', enabled: !hooksInstalled });
+          // Toggle the DISPLAYED state (actual install), not the preference: when the two disagree — preference on,
+          // nothing installed while consent is pending — toggling the preference would turn hooks OFF for a user
+          // asking for ON. No optimistic local update either; both backends answer with the truthful hooksStatus this
+          // checkbox renders, so it lands correct instead of flickering when an install fails. The providerId is
+          // ECHOED from that row (never originated here), so nothing sends until the row has arrived.
+          const [rowProviderId] =
+            Object.entries(hooksInstalled).find(([id]) => id === 'claude') ?? [];
+          if (rowProviderId !== undefined) {
+            transport.send({
+              type: 'setHooksEnabled',
+              providerId: rowProviderId,
+              enabled: !claudeHooksInstalled,
+            });
+          }
         }}
         showAreas={showAreas}
         onToggleShowAreas={onToggleShowAreas}
@@ -580,6 +589,13 @@ function App() {
           installFailed={installFailed}
           onChoice={handleConsentChoice}
           onClose={handleIntroClose}
+          escapeSuppressed={
+            isSettingsOpen ||
+            isChangelogOpen ||
+            isHooksInfoOpen ||
+            showMigrationNotice ||
+            editor.isEditMode
+          }
         />
       )}
     </div>

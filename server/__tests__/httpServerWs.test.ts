@@ -92,7 +92,8 @@ function waitForMessage(socket: WebSocket, type: string, ms = 2_000): Promise<un
 function readHooksConsent(): boolean {
   try {
     const raw = fs.readFileSync(path.join(tmpBase, '.pixel-agents', 'config.json'), 'utf-8');
-    return (JSON.parse(raw) as { hooksConsentGiven?: boolean }).hooksConsentGiven === true;
+    const consent = (JSON.parse(raw) as { hooksConsent?: Record<string, string> }).hooksConsent;
+    return consent?.claude === 'granted';
   } catch {
     return false;
   }
@@ -126,8 +127,8 @@ describe('/ws connection gate', () => {
       // Mirrors the standalone CLI's own side effect (server/src/cli.ts): an
       // enable toggle over this socket IS the consent grant. Wired here so the
       // cross-origin test asserts the real privilege, not just a close code.
-      onSetHooksEnabled: async (enabled: boolean) => {
-        if (enabled) grantHooksConsent();
+      onSetHooksEnabled: async (providerId: string, enabled: boolean) => {
+        if (enabled) grantHooksConsent(providerId);
       },
     });
     return { port: config.port };
@@ -148,7 +149,9 @@ describe('/ws connection gate', () => {
 
     // Even if the attacker keeps writing, nothing is processed.
     try {
-      result.socket.send(JSON.stringify({ type: 'setHooksEnabled', enabled: true }));
+      result.socket.send(
+        JSON.stringify({ type: 'setHooksEnabled', providerId: 'claude', enabled: true }),
+      );
     } catch {
       /* socket already closed — that IS the point */
     }
@@ -276,9 +279,9 @@ describe('/ws privileged-message gate', () => {
       store: new AgentStateStore(),
       // The real cli.ts side effect, minus the actual install: an enable
       // toggle over this socket IS the consent grant (server/src/cli.ts).
-      onSetHooksEnabled: (enabled: boolean) => {
+      onSetHooksEnabled: (providerId: string, enabled: boolean) => {
         sideEffects.push(enabled);
-        if (enabled) grantHooksConsent();
+        if (enabled) grantHooksConsent(providerId);
       },
     });
     return { port: config.port, token: config.token };
@@ -286,7 +289,7 @@ describe('/ws privileged-message gate', () => {
 
   /** Send setHooksEnabled over an accepted socket and let it settle. */
   async function sendToggle(socket: WebSocket, enabled: boolean): Promise<void> {
-    socket.send(JSON.stringify({ type: 'setHooksEnabled', enabled }));
+    socket.send(JSON.stringify({ type: 'setHooksEnabled', providerId: 'claude', enabled }));
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
 
@@ -435,7 +438,9 @@ describe('/ws privileged-message gate', () => {
     result.socket.send(JSON.stringify({ type: 'webviewReady' }));
     expect(await request).toBeNull();
 
-    result.socket.send(JSON.stringify({ type: 'hooksConsentResponse', choice: 'install' }));
+    result.socket.send(
+      JSON.stringify({ type: 'hooksConsentResponse', providerId: 'claude', choice: 'install' }),
+    );
     await new Promise((resolve) => setTimeout(resolve, 500));
     expect(sideEffects).toEqual([]);
     expect(readHooksConsent()).toBe(false);
@@ -452,7 +457,9 @@ describe('/ws privileged-message gate', () => {
     );
     sockets.push(result.socket);
 
-    result.socket.send(JSON.stringify({ type: 'hooksConsentResponse', choice: 'install' }));
+    result.socket.send(
+      JSON.stringify({ type: 'hooksConsentResponse', providerId: 'claude', choice: 'install' }),
+    );
     await new Promise((resolve) => setTimeout(resolve, 500));
     expect(sideEffects).toEqual([true]);
     expect(readHooksConsent()).toBe(true);

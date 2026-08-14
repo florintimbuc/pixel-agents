@@ -679,10 +679,17 @@ components:
         install state changes (consent granted, settings toggle, uninstall).
       type: object
       additionalProperties: false
-      required: [type, installed]
+      required: [type, providerId, installed]
       properties:
         type:
           const: hooksStatus
+        providerId:
+          type: string
+          description: >-
+            The hook provider this install state is about (HookProvider.id,
+            e.g. "claude"). Consumers keyed on install state must never mix
+            one provider's status into another's — the Intro's install
+            verdict in particular reads only the provider it asked about.
         installed:
           type: boolean
 
@@ -694,16 +701,24 @@ components:
         on privileged (tokened) connections, since an untokened spectator could not
         act on it anyway (its `hooksConsentResponse` would be ignored).
 
-        Carries the disclosure copy so the client renders the server's exact terms
-        (consentCopy.ts, shared with no client-side duplicate to drift). The client
-        answers with `hooksConsentResponse`; dismissing the dialog sends nothing
-        and the request fires again on the next connect.
+        Carries the provider being asked about and its disclosure copy so the
+        client renders the server's exact terms (the provider's
+        consentDisclosure(), shared with no client-side duplicate to drift).
+        The client answers with `hooksConsentResponse`, echoing the providerId;
+        dismissing the dialog sends nothing and the request fires again on the
+        next connect. One request per provider that needs an answer.
       type: object
       additionalProperties: false
-      required: [type, headline, disclosure]
+      required: [type, providerId, headline, disclosure]
       properties:
         type:
           const: hooksConsentRequest
+        providerId:
+          type: string
+          description: >-
+            The hook provider whose install is being approved (HookProvider.id).
+            The client never originates this value — it echoes it back in its
+            `hooksConsentResponse`.
         headline:
           type: string
           description: One-sentence summary of what is being approved.
@@ -890,35 +905,56 @@ components:
     SetHooksEnabled:
       type: object
       additionalProperties: false
-      required: [type, enabled]
+      required: [type, providerId, enabled]
       properties:
         type:
           const: setHooksEnabled
+        providerId:
+          type: string
+          description: >-
+            The hook provider being toggled (HookProvider.id). The client
+            echoes the id of the hooksStatus row the checkbox renders; it
+            never originates one.
         enabled:
           type: boolean
 
     HooksConsentResponse:
       description: |
-        The user's answer to `hooksConsentRequest`. Only an exact `install` grants
-        consent and installs; only an exact `never` persists hooks-off (without
-        touching ~/.claude/settings.json — nothing of ours is installed when this
-        dialog shows). `notNow` and any unrecognized value write NOTHING and the
-        user is asked again on the next connect — a malformed choice must never be
-        read as approval. The server ignores this message on unprivileged
-        standalone connections, which were never sent the request.
+        The user's answer to `hooksConsentRequest` — an ABSOLUTE statement of
+        the state the user wants, revisable from the Intro's closing step. Only
+        an exact `install` grants consent and installs; only an exact `never`
+        records a durable decline and persists hooks-off (uninstalling first
+        when this provider's hooks are on disk from an earlier answer).
+        `notNow` writes nothing on a fresh ask, but over anything an EARLIER
+        answer left behind it reverts it — uninstalling a landed install,
+        clearing a recorded grant or decline — so the ask genuinely returns on
+        the next connect. Any unrecognized value writes NOTHING and the user is
+        asked again — a malformed choice must never be read as approval, a
+        durable decline, or an uninstall trigger. The server ignores this
+        message on unprivileged standalone connections, which were never sent
+        the request.
       type: object
       additionalProperties: false
-      required: [type, choice]
+      required: [type, providerId, choice]
       properties:
         type:
           const: hooksConsentResponse
+        providerId:
+          type: string
+          description: >-
+            The provider this answer is about, echoed verbatim from the
+            `hooksConsentRequest` that solicited it. An id naming no
+            registered provider is treated exactly like a junk choice:
+            write nothing.
         choice:
           $ref: '#/components/schemas/HooksConsentChoice'
 
     HooksConsentChoice:
       description: >-
-        The three consent outcomes. Receivers must treat any other value exactly
-        like notNow: write nothing, ask again.
+        The three consent outcomes. Receivers must treat any other value as a
+        no-op: write nothing, ask again. (An exact notNow itself is a no-op
+        only on a fresh ask — over an earlier answer it is a revision that
+        undoes what that answer left behind.)
       type: string
       enum: [install, notNow, never]
 

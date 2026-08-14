@@ -41,7 +41,7 @@ export interface LaunchStandaloneOptions {
   /** Reuse an existing workspace. A supplied directory is never removed by
    *  standalone cleanup. */
   workspaceDir?: string;
-  /** Pre-seed `hooksConsentGiven: true` so the first-run consent dialog never
+  /** Pre-seed a granted Claude hooksConsent entry so the first-run dialog never
    *  covers the office (default). The consent specs opt out with `false` —
    *  they are the only ones that want the dialog. Never overwrites a
    *  config.json that already exists (a shared HOME was seeded by its owner). */
@@ -240,7 +240,7 @@ export async function launchStandalone(
   const configPath = path.join(tmpHome, '.pixel-agents', 'config.json');
   if ((options.seedHooksConsent ?? true) && !fs.existsSync(configPath)) {
     fs.mkdirSync(path.dirname(configPath), { recursive: true });
-    fs.writeFileSync(configPath, JSON.stringify({ hooksConsentGiven: true }, null, 2));
+    fs.writeFileSync(configPath, JSON.stringify({ hooksConsent: { claude: 'granted' } }, null, 2));
   }
   const hostPort = await getFreePort();
   const hostUrl = `http://127.0.0.1:${hostPort}`;

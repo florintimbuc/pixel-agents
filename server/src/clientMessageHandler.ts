@@ -1,19 +1,29 @@
+import type { HookProvider } from '../../core/src/provider.js';
 import { buildAgentDiagnostics } from './agentDiagnostics.js';
 import type { AgentRuntime } from './agentRuntime.js';
 import type { AgentStateStore } from './agentStateStore.js';
 import type { LoadedAssets, LoadedCharacterSprites, LoadedPetSprites } from './assetLoader.js';
-import { readConfig, writeConfig } from './configPersistence.js';
+import {
+  getHooksConsent,
+  getHooksEnabled,
+  readConfig,
+  setHooksEnabled,
+  writeConfig,
+} from './configPersistence.js';
 import { HUE_SHIFT_MAX_DEG, PALETTE_COUNT } from './constants.js';
 import { readLayoutFromFile, writeLayoutToFile } from './layoutPersistence.js';
-import type { ConsentEffects } from './providers/hook/claude/consentExecutor.js';
-import { applyConsentChoice } from './providers/hook/claude/consentExecutor.js';
-import { hooksConsentRequest } from './providers/hook/claude/consentGate.js';
-import { claudeProvider } from './providers/index.js';
+import type { ConsentEffects } from './providers/hook/consentExecutor.js';
+import { applyConsentChoice } from './providers/hook/consentExecutor.js';
+import { hooksConsentRequest } from './providers/hook/consentGate.js';
+import { claudeProvider, hookProviderById, hookProviders } from './providers/index.js';
 
 type WsSend = (message: Record<string, unknown>) => void;
 
 /** Async hook toggle side effect (install/uninstall + script copy). Provided by cli.ts. */
-export type SetHooksEnabledSideEffect = (enabled: boolean) => Promise<void> | void;
+export type SetHooksEnabledSideEffect = (
+  providerId: string,
+  enabled: boolean,
+) => Promise<void> | void;
 
 /**
  * Reload server-side assets after an external-asset-directory change and
@@ -57,7 +67,6 @@ const KEY_LAST_SEEN_VERSION = 'pixel-agents.lastSeenVersion';
 const KEY_ALWAYS_SHOW_LABELS = 'pixel-agents.alwaysShowLabels';
 const KEY_GHOST_HEADLESS_AGENTS = 'pixel-agents.ghostHeadlessAgents';
 const KEY_WATCH_ALL_SESSIONS = 'pixel-agents.watchAllSessions';
-const KEY_HOOKS_ENABLED = 'pixel-agents.hooksEnabled';
 const KEY_HOOKS_INFO_SHOWN = 'pixel-agents.hooksInfoShown';
 const KEY_SHOW_AREAS = 'pixel-agents.showAreas';
 
@@ -171,21 +180,25 @@ export function handleClientMessage(
 
     case 'setHooksEnabled': {
       const enabled = msg.enabled as boolean;
+      // The provider id is echoed by the client, never originated: an unknown
+      // id names nothing to install into, so it is dropped like a junk choice.
+      const provider = hookProviderById(msg.providerId);
+      if (!provider) break;
       if (!ctx.privileged) {
         // No server token on this connection: the toggle would grant durable
-        // consent to modify ~/.claude/settings.json on THIS machine, and only
-        // the operator — who was handed the tokened URL — gets to decide that.
+        // consent to modify a settings file on THIS machine, and only the
+        // operator — who was handed the tokened URL — gets to decide that.
         // Answer with the truth so the checkbox still shows reality instead of
         // silently appearing to have worked.
         console.warn(
           '[Pixel Agents] Ignoring setHooksEnabled from an untokened client — installing hooks needs approval from this machine (open the tokened URL the CLI printed).',
         );
-        void claudeProvider
+        void provider
           .areHooksInstalled()
-          .then((installed) => send({ type: 'hooksStatus', installed }));
+          .then((installed) => send({ type: 'hooksStatus', providerId: provider.id, installed }));
         break;
       }
-      void applyHooksPreference(ctx, send, enabled);
+      void applyHooksPreference(ctx, send, provider, enabled);
       break;
     }
 
@@ -199,7 +212,15 @@ export function handleClientMessage(
         );
         break;
       }
-      void applyConsentChoice(msg.choice, standaloneConsentEffects(ctx, send));
+      // Fail-closed on the provider exactly like on the choice: an id naming
+      // no registered provider writes nothing.
+      const provider = hookProviderById(msg.providerId);
+      if (!provider) break;
+      void applyConsentChoice(
+        provider.id,
+        msg.choice,
+        standaloneConsentEffects(ctx, send, provider),
+      );
       break;
     }
 
@@ -256,69 +277,76 @@ export function handleClientMessage(
 }
 
 /**
- * Run the hooks install/uninstall side effect, then persist the preference —
- * only AFTER the side effect settled, and only when the on-disk result agrees.
- * Writing it first strands the user when the uninstall fails: the entries stay
- * on disk and keep firing, while the persisted hooks-off makes the next
- * startup skip the consent/install path entirely — never asked again, no
- * route left to remove them.
- *
- * Shared by the Settings toggle and the consent dialog's Install button; both
- * are consent grants (onSetHooksEnabled(true) calls grantHooksConsent()).
- *
- * Never rejects: the setHooksEnabled dispatch fires-and-forgets it, and as the
- * consent executor's `setHooksEnabled` effect it is bound by the ConsentEffects
- * never-reject contract — so a failure is surfaced here (the console is this
- * surface's error channel) or nowhere. Mirrors the VS Code path, which also
- * skips both the persist and the status report when the re-derive fails:
- * neither is worth doing on a guess.
+ * Run the install/uninstall side effect, then persist the provider's preference — only after it settled and only when
+ * the on-disk result agrees. Writing it first strands the user when an uninstall fails: entries keep firing while the
+ * persisted hooks-off makes the next startup skip the gate entirely. Shared by the Settings toggle and the consent
+ * dialog's Install (both are grants). Never rejects — it is fire-and-forget and bound by the ConsentEffects contract,
+ * so a failure surfaces on the console here or nowhere.
  */
 async function applyHooksPreference(
   ctx: ClientMessageContext,
   send: WsSend,
+  provider: HookProvider,
   enabled: boolean,
 ): Promise<void> {
   try {
-    await ctx.onSetHooksEnabled?.(enabled);
-    const installed = await claudeProvider.areHooksInstalled();
+    await ctx.onSetHooksEnabled?.(provider.id, enabled);
+    const installed = await provider.areHooksInstalled();
     if (installed === enabled) {
-      ctx.store.getAdapter()?.setSetting(KEY_HOOKS_ENABLED, enabled);
-      if (ctx.runtime) ctx.runtime.hooksEnabled.current = enabled;
+      setHooksEnabled(provider.id, enabled);
+      // The runtime's single hooksEnabled ref gates the CLAUDE scanners; it
+      // follows only the Claude provider until the scanners grow per-provider
+      // awareness alongside the Settings UI.
+      if (ctx.runtime && provider.id === claudeProvider.id) {
+        ctx.runtime.hooksEnabled.current = enabled;
+      }
     }
     // Always report the ACTUAL install state — the toggle expresses intent,
     // not outcome (the installer refuses to touch an unparseable file).
-    send({ type: 'hooksStatus', installed });
+    send({ type: 'hooksStatus', providerId: provider.id, installed });
   } catch (err) {
     console.error('[Pixel Agents] Applying the hooks preference failed:', err);
   }
 }
 
 /**
- * This surface's half of carrying out a consent answer. Both the choice→action
- * rule and the order of the writes live in the shared consent modules; only
- * the effects below are standalone-specific (store adapter, console, socket).
+ * This surface's half of carrying out a consent answer for one provider. The choice→action rule and the write order
+ * live in the shared consent modules; only these effects are standalone-specific (console, socket), each bound to the
+ * one provider being answered.
  */
-function standaloneConsentEffects(ctx: ClientMessageContext, send: WsSend): ConsentEffects {
+function standaloneConsentEffects(
+  ctx: ClientMessageContext,
+  send: WsSend,
+  provider: HookProvider,
+): ConsentEffects {
   return {
-    setHooksEnabled: (enabled) => applyHooksPreference(ctx, send, enabled),
+    setHooksEnabled: (enabled) => applyHooksPreference(ctx, send, provider, enabled),
     uninstallHooks: async () => {
       // The same side effect the toggle runs, minus the preference write. The
       // catch keeps the never-reject contract true by construction — the host
       // callback's own contract is unstated.
       try {
-        await ctx.onSetHooksEnabled?.(false);
+        await ctx.onSetHooksEnabled?.(provider.id, false);
       } catch (err) {
         console.error('[Pixel Agents] Hook uninstall failed:', err);
       }
     },
-    areHooksInstalled: () => claudeProvider.areHooksInstalled(),
-    persistHooksOff: () => {
-      ctx.store.getAdapter()?.setSetting(KEY_HOOKS_ENABLED, false);
-      if (ctx.runtime) ctx.runtime.hooksEnabled.current = false;
+    areHooksInstalled: () => provider.areHooksInstalled(),
+    syncHooksPreferenceOff: () => {
+      // Durable writes are the executor's own atomic recordHooksDecline; this
+      // only mirrors the live runtime ref the CLAUDE scanners read, so another
+      // provider's answer can never flip Claude's fallback behavior.
+      if (ctx.runtime && provider.id === claudeProvider.id) {
+        ctx.runtime.hooksEnabled.current = false;
+      }
     },
     reportHooksStatus: async () => {
       try {
-        send({ type: 'hooksStatus', installed: await claudeProvider.areHooksInstalled() });
+        send({
+          type: 'hooksStatus',
+          providerId: provider.id,
+          installed: await provider.areHooksInstalled(),
+        });
       } catch {
         // Never let a status broadcast mask the error already surfaced.
       }
@@ -376,7 +404,10 @@ function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
   // 4. Settings (from adapter, with sensible defaults when adapter is absent)
   const cfg = readConfig();
   const watchAllSessions = adapter?.getSetting(KEY_WATCH_ALL_SESSIONS, false) ?? false;
-  const hooksEnabled = adapter?.getSetting(KEY_HOOKS_ENABLED, true) ?? true;
+  // settingsLoaded.hooksEnabled stays a single boolean carrying the CLAUDE
+  // provider's preference until the Settings UI grows a per-provider list —
+  // its sole webview reader is the hooks tooltip gate.
+  const hooksEnabled = getHooksEnabled(claudeProvider.id);
   const showAreas = adapter?.getSetting(KEY_SHOW_AREAS, false) ?? false;
   send({
     type: 'settingsLoaded',
@@ -394,26 +425,39 @@ function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
 
   // 4a. Actual install state, distinct from the hooksEnabled preference —
   // hooksEnabled defaults true while first-run consent is still pending. The
-  // provider check is async, so this lands as a follow-up right after the
+  // provider checks are async, so these land as follow-ups right after the
   // synchronous handshake; the webview's default (not installed) is the safe
-  // assumption until it arrives.
-  void claudeProvider.areHooksInstalled().then((installed) => {
-    send({ type: 'hooksStatus', installed });
-    // 4a-bis. First-run consent, asked in the app: this connect is the moment
-    // the user can be asked, so the request rides the same handshake.
-    // consentGate owns every condition (the VS Code surface calls the same
-    // function). The consent flag is re-read here, not taken from startup:
-    // another tab may have answered while this one was loading. Dismissing
-    // the dialog sends nothing, so the request simply fires again on the next
-    // connect — fail-closed, never nagging within a session.
-    const request = hooksConsentRequest({
-      installed,
-      hooksEnabled: adapter?.getSetting(KEY_HOOKS_ENABLED, true) ?? true,
-      consentGiven: readConfig().hooksConsentGiven === true,
-      privileged: ctx.privileged === true,
-    });
-    if (request) send({ ...request }); // spread: WsSend takes an index-signature shape
-  });
+  // assumption until each arrives. One status + at most one ask PER PROVIDER.
+  for (const provider of hookProviders) {
+    // One provider's unreadable settings file must degrade to
+    // installed=false (matching the executor's fail-closed read: no choice
+    // ever uninstalls on a guess) rather than surface as an unhandled
+    // rejection that can take the process down — and must never block the
+    // other providers' statuses.
+    void provider
+      .areHooksInstalled()
+      .catch((err: unknown) => {
+        console.error(`[Pixel Agents] hooks status check failed for provider ${provider.id}:`, err);
+        return false;
+      })
+      .then((installed) => {
+        send({ type: 'hooksStatus', providerId: provider.id, installed });
+        // 4a-bis. First-run consent, asked in the app: this connect is the moment the user can be asked, so the ask
+        // rides the handshake and consentGate owns every condition (VS Code calls the same function). The record is
+        // re-read here rather than taken from startup — another tab may have answered while this one loaded.
+        // Dismissing sends nothing, so the ask returns on the next connect: fail-closed, never nagging in-session.
+        const request = hooksConsentRequest(
+          {
+            installed,
+            hooksEnabled: getHooksEnabled(provider.id),
+            consentAnswered: getHooksConsent(provider.id) !== 'unanswered',
+            privileged: ctx.privileged === true,
+          },
+          provider,
+        );
+        if (request) send({ ...request }); // spread: WsSend takes an index-signature shape
+      });
+  }
 
   // 4b. Folder→Area mappings (must arrive before existingAgents so the
   // webview seat-preference logic has the dict when characters are created).

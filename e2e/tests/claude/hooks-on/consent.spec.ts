@@ -8,37 +8,20 @@ import { advanceIntroToConsentStep, finishIntro } from '../../../helpers/intro';
 import { getSettingChecked, setSettings } from '../../../helpers/webview';
 
 /**
- * The Intro — the four-step first-run tour — and, inside it, the consent gate
- * for modifying ~/.claude/settings.json.
- *
- * Every other spec seeds `hooksConsentGiven: true` (e2e/helpers/launch.ts) so
- * hooks flow without a prompt. These specs opt OUT via `seedConfig`: a config
- * without the key parses to false (server/src/configPersistence.ts), which is
- * exactly what a real first run looks like.
- *
- * The tour is rendered IN THE APP, diegetically: a greeter character stands
- * near the office's bottom-left corner and the webview's IntroBubble — its
- * speech bubble, driven by the server's `hooksConsentRequest` during the
- * webviewReady handshake — pages welcome → Claude Code → hooks consent →
- * all set. The consent step carries the server's disclosure verbatim and the
- * three choice buttons; a choice sends immediately and the tour moves to its
- * closing step, from which Back allows a genuine change of mind (the server
- * undoes a landed install when the revision asks for that). These specs
- * address the tour inside the Pixel Agents frame, not in VS Code chrome. Both
- * surfaces (VS Code webview and standalone browser) render this same
- * component off the same message; the standalone side is pinned in
- * e2e/tests/standalone/hooks.spec.ts.
- *
- * The gate is the answer to a 1-star Marketplace review: Pixel Agents replaced
- * a user's whole settings.json with no prompt, no backup, and no disclosure.
- * These tests assert the on-disk consequences of each choice, not just that a
- * prompt appeared.
+ * The Intro — the four-step first-run tour — and, inside it, the consent gate for modifying ~/.claude/settings.json.
+ * Every other spec seeds a granted Claude consent so hooks flow silently; these opt OUT via `seedConfig`, which is
+ * what a real first run looks like. The tour is diegetic: a greeter stands near the office's bottom-left corner and
+ * the IntroBubble is its speech bubble, driven by the server's `hooksConsentRequest`, paging welcome → Claude Code →
+ * consent → all set. A choice sends immediately and moves to the closing step, from which Back allows a genuine
+ * change of mind. Both surfaces render this component off the same message (standalone: standalone/hooks.spec.ts).
+ * The gate answers a 1-star review — a settings.json replaced with no prompt, backup or disclosure — so these assert
+ * the ON-DISK consequence of each choice, not just that a prompt appeared.
  */
 
 const NO_CONSENT_CONFIG = {
   vscode: { alwaysShowLabels: true },
   standalone: { alwaysShowLabels: true },
-  // hooksConsentGiven deliberately absent -> parses to false -> dialog shows.
+  // hooksConsent deliberately absent -> parses to unanswered -> dialog shows.
 };
 
 /** The in-app Intro. IntroBubble is the only role="dialog" element
@@ -97,7 +80,8 @@ function ourHookEvents(tmpHome: string): string[] {
 function readConsent(tmpHome: string): boolean {
   try {
     const raw = fs.readFileSync(path.join(tmpHome, '.pixel-agents', 'config.json'), 'utf8');
-    return (JSON.parse(raw) as { hooksConsentGiven?: boolean }).hooksConsentGiven === true;
+    const consent = (JSON.parse(raw) as { hooksConsent?: Record<string, string> }).hooksConsent;
+    return consent?.claude === 'granted';
   } catch {
     return false;
   }
@@ -106,20 +90,17 @@ function readConsent(tmpHome: string): boolean {
 function readHooksEnabled(tmpHome: string): boolean | undefined {
   try {
     const raw = fs.readFileSync(path.join(tmpHome, '.pixel-agents', 'config.json'), 'utf8');
-    return (JSON.parse(raw) as { vscode?: { hooksEnabled?: boolean } }).vscode?.hooksEnabled;
+    return (JSON.parse(raw) as { hooksEnabled?: Record<string, boolean> }).hooksEnabled?.claude;
   } catch {
     return undefined;
   }
 }
 
 /**
- * A pre-consent (legacy) settings.json: our command on 14 events, including the
- * two we no longer collect, plus a third-party hook sharing one entry.
- *
- * The hook command is matched by its `.pixel-agents/hooks/claude-hook.js` path
- * SUFFIX, not against the resolved homedir, so a literal `/home/legacy/...`
- * path is recognized as ours even though the test HOME is a temp dir. That is
- * what lets this be seeded at launch time, before the temp HOME's name exists.
+ * A pre-consent (legacy) settings.json: our command on 14 events, including the two we no longer collect, plus a
+ * third-party hook sharing one entry. The command is matched by its `.pixel-agents/hooks/claude-hook.js` path SUFFIX
+ * rather than against the resolved homedir, so a literal `/home/legacy/...` reads as ours even though the test HOME
+ * is a temp dir — which is what lets this be seeded at launch time, before that temp HOME has a name.
  */
 function legacyClaudeSettings(thirdPartyCommand: string): unknown {
   const command = 'node "/home/legacy/.pixel-agents/hooks/claude-hook.js"';
@@ -357,6 +338,45 @@ test.describe('Hooks consent gate', () => {
     narrator.check('Settings shows Instant Detection OFF');
   });
 
+  // The other stranding cell of the revision matrix: "Don't Ask Again", Back,
+  // "Not Now". The decline persisted hooks-off, and the consent gate reads a
+  // hooks-off preference as never-ask-again — so a "Not Now" that wrote
+  // nothing here would retire an ask whose FINAL answer was "ask me again".
+  // The revision must take back the decline AND the preference it wrote.
+  test("Back after Don't Ask Again lets Not Now bring the ask back @area:cross-cutting", async ({
+    pixelAgents,
+  }) => {
+    const { frame, tmpHome, narrator } = pixelAgents;
+
+    const dialog = await openConsentDialog(frame);
+    await advanceIntroToConsentStep(dialog);
+
+    narrator.step("declining with Don't Ask Again, then walking back to revise");
+    await dialog.getByRole('button', { name: "Don't Ask Again" }).click();
+    await expect.poll(() => readHooksEnabled(tmpHome), { timeout: 15_000 }).toBe(false);
+    narrator.check('the decline persisted hooks-off');
+
+    await expect(dialog).toContainText("You're all set!");
+    await dialog.getByRole('button', { name: 'Back' }).click();
+    await expect(dialog.getByRole('button', { name: 'Install Hooks' })).toBeVisible();
+
+    narrator.step('revising to Not Now');
+    await dialog.getByRole('button', { name: 'Not Now' }).click();
+
+    // The decline's own preference write is taken back with it: the key is
+    // gone (default true applies), consent is unanswered, nothing installed.
+    await expect.poll(() => readHooksEnabled(tmpHome), { timeout: 15_000 }).not.toBe(false);
+    expect(readConsent(tmpHome)).toBe(false);
+    expect(ourHookEvents(tmpHome)).toEqual([]);
+    narrator.check('hooks-off un-persisted and consent unanswered — the ask can return');
+
+    await finishIntro(dialog);
+    // The on-disk state above IS what makes the ask return: the consent gate
+    // asks exactly when consent is unanswered, the preference is default, and
+    // nothing is installed (the wire-level re-ask on the next connect is
+    // pinned in server/__tests__/consentFlow.test.ts).
+  });
+
   // The population issue #377 is about: a settings.json we refuse to touch.
   // Two things have to hold when Install fails on it.
   //
@@ -535,7 +555,9 @@ test.describe('Hooks consent gate / pre-consent install', () => {
  * genuinely ON, and a removal that cannot land.
  */
 test.describe('Hooks consent gate / toggle-off failure', () => {
-  test.use({ seedConfig: { vscode: { alwaysShowLabels: true }, hooksConsentGiven: true } });
+  test.use({
+    seedConfig: { vscode: { alwaysShowLabels: true }, hooksConsent: { claude: 'granted' } },
+  });
 
   test.skip(process.platform === 'win32', 'chmod-based write failure is not meaningful on Windows');
 

@@ -46,7 +46,7 @@ async function attachText(
 export const test = base.extend<{
   standalone: StandaloneContext;
   _allureLabels: void;
-  /** Seed `hooksConsentGiven: true` in the isolated HOME (default). The
+  /** Seed a granted Claude hooksConsent entry in the isolated HOME (default). The
    *  consent specs opt out via `test.use({ seedHooksConsent: false })` so the
    *  first-run dialog shows — they are the only ones that want it. */
   seedHooksConsent: boolean;

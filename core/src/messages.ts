@@ -279,11 +279,13 @@ export interface SettingsLoaded {
 
 export interface HooksStatus {
   type: 'hooksStatus';
+  providerId: string;
   installed: boolean;
 }
 
 export interface HooksConsentRequest {
   type: 'hooksConsentRequest';
+  providerId: string;
   headline: string;
   disclosure: string;
 }
@@ -371,11 +373,13 @@ export interface SetGhostHeadlessAgents {
 
 export interface SetHooksEnabled {
   type: 'setHooksEnabled';
+  providerId: string;
   enabled: boolean;
 }
 
 export interface HooksConsentResponse {
   type: 'hooksConsentResponse';
+  providerId: string;
   choice: HooksConsentChoice;
 }
 
